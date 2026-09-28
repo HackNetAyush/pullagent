@@ -140,6 +140,25 @@ match the canonical model ID. Defaults: Sonnet 5 for finders, Opus 5 for T3
 verification. **No Haiku tier** — not every deployment has one, and Sonnet at
 `effort=low` is close enough in cost without adding a required model.
 
+## Learning and measurement
+
+```bash
+cr learn --pr owner/repo#42   # record resolved threads + thumbs-down as suppressions
+cr stats                      # runs, cost, how often suppressions fired
+cr eval --runs 3              # score against PRs whose bugs are known
+```
+
+Rejections are stored per repo by finding fingerprint and filtered out of every
+later review, so the same wrong comment never comes back. SQLite by default;
+point `CR_DATABASE_URL` at Postgres and nothing else changes.
+
+`cr eval` is the only reason any quality claim here is trustworthy. Recall is
+solid; precision is a **lower bound**, since an unmatched finding may be a real
+defect nobody labelled.
+
+Current score on `evals/fixtures/turbo-chat-1.json` (3 planted bugs, 3 runs):
+**100% recall, every run.**
+
 ## Design docs
 
 | | |
