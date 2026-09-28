@@ -76,6 +76,15 @@ class Finding(BaseModel):
     def anchor_line(self) -> int:
         return self.evidence[0].start_line
 
+    def locality(self) -> tuple[str, int, str]:
+        """Coarse identity: same file, same neighbourhood, same category.
+
+        Two lenses describing one defect produce different prose and therefore
+        different fingerprints, so fingerprinting alone lets both through. This
+        is what actually collapses them.
+        """
+        return (self.anchor_file, self.anchor_line // 5, str(self.category))
+
     def fingerprint(self) -> str:
         """Stable identity across runs, for dedup and suppression memory (D5).
 

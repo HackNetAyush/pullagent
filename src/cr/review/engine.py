@@ -81,7 +81,21 @@ def prefilter(findings: list[Finding], s: Settings) -> tuple[list[Finding], list
         else:
             dropped.append(f)
 
-    return list(kept.values()), dropped
+    # Second pass: collapse findings that differ only in wording. Without this
+    # two lenses spotting one bug both get posted, which is the noise problem.
+    by_locality: dict[tuple, Finding] = {}
+    for f in kept.values():
+        loc = f.locality()
+        best = by_locality.get(loc)
+        if best is None:
+            by_locality[loc] = f
+        elif f.confidence > best.confidence:
+            dropped.append(best)
+            by_locality[loc] = f
+        else:
+            dropped.append(f)
+
+    return list(by_locality.values()), dropped
 
 
 async def verify(

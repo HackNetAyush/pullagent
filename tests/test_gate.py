@@ -144,3 +144,26 @@ def test_killed_findings_are_reported_as_suppressed_not_dropped() -> None:
     posted, suppressed = gate([_verified([True, True])], TIERS["T2"])
     assert posted == []
     assert len(suppressed) == 1
+
+
+def test_paraphrases_of_one_defect_collapse() -> None:
+    """Two lenses describing the same bug produce different fingerprints, so
+    fingerprint dedup alone lets both through and the PR gets two comments."""
+    a = _finding("Send button disabled state uses draft.length", confidence=0.6, line=66)
+    b = _finding(
+        "The send button's disabled state is computed from draft.length===0",
+        confidence=0.9,
+        line=67,
+    )
+    kept, dropped = prefilter([a, b], settings)
+    assert len(kept) == 1
+    assert kept[0].confidence == 0.9
+    assert len(dropped) == 1
+
+
+def test_distinct_defects_in_one_file_both_survive() -> None:
+    """Locality dedup must not merge genuinely different bugs."""
+    a = _finding("off-by-one", line=10)
+    b = _finding("null deref", line=200)
+    kept, _ = prefilter([a, b], settings)
+    assert len(kept) == 2

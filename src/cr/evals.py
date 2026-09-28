@@ -101,8 +101,10 @@ def score_run(fixture: Fixture, result: ReviewResult) -> RunScore:
             blob = f"{f.claim} {f.failure_scenario} {f.suggested_fix or ''}".lower()
             if sum(1 for n in needles if n in blob) >= exp.min_matches:
                 s.found.add(exp.id)
+                # Mark every match, not just the first. Two findings describing
+                # the same bug are a duplication problem, not unlabelled findings,
+                # and counting them as extras understates precision.
                 matched_findings.add(i)
-                break
 
     for i, vf in enumerate(result.posted):
         if i not in matched_findings:
