@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from cr.config import T3_VERIFIER_MODEL, Settings, TierConfig
 from cr.config import settings as default_settings
@@ -160,11 +161,25 @@ async def verify(
     return list(await asyncio.gather(*(one(f) for f in findings)))
 
 
+@dataclass
+class GateResult:
+    """Why each finding did or did not get posted. Kept disjoint on purpose."""
+
+    posted: list[VerifiedFinding] = field(default_factory=list)
+    refuted: list[VerifiedFinding] = field(default_factory=list)
+    memory_suppressed: list[VerifiedFinding] = field(default_factory=list)
+    budget_trimmed: list[VerifiedFinding] = field(default_factory=list)
+
+    @property
+    def not_posted(self) -> list[VerifiedFinding]:
+        return self.refuted + self.memory_suppressed + self.budget_trimmed
+
+
 def gate(
     verified: list[VerifiedFinding],
     tier: TierConfig,
     suppressed_fps: set[str] | None = None,
-) -> tuple[list, list]:
+) -> GateResult:
     """Stage 8 — survivors, ranked, capped.
 
     The comment budget is a feature. Anything past the cap is real but not worth
@@ -178,9 +193,14 @@ def gate(
         log.info("suppression memory dropped %d finding(s)", len(memory_killed))
 
     survivors = [v for v in remaining if v.survived]
-    killed = memory_killed + [v for v in remaining if not v.survived]
+    refuted = [v for v in remaining if not v.survived]
     survivors.sort(key=lambda v: v.rank, reverse=True)
-    return survivors[: tier.max_comments], killed + survivors[tier.max_comments :]
+    return GateResult(
+        posted=survivors[: tier.max_comments],
+        refuted=refuted,
+        memory_suppressed=memory_killed,
+        budget_trimmed=survivors[tier.max_comments :],
+    )
 
 
 async def review(
@@ -242,14 +262,17 @@ async def review(
 
     emit("gate")
     fps = store.suppressed_fingerprints(repo.slug) if remember else set()
-    posted, suppressed = gate(verified, tier, fps)
+    g = gate(verified, tier, fps)
     if fps:
-        store.bump_hits(repo.slug, {v.finding.fingerprint() for v in suppressed} & fps)
+        store.bump_hits(repo.slug, {v.finding.fingerprint() for v in g.memory_suppressed})
 
     result = ReviewResult(
         tier=tier.name,
-        posted=posted,
-        suppressed=suppressed,
+        posted=g.posted,
+        suppressed=g.not_posted,
+        refuted=g.refuted,
+        memory_suppressed=g.memory_suppressed,
+        budget_trimmed=g.budget_trimmed,
         usage=llm.usage,
         elapsed_s=time.monotonic() - started,
     )

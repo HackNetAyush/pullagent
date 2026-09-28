@@ -67,6 +67,7 @@ def _add_missing_columns(engine) -> None:
     wanted = {
         "source": "VARCHAR(16) DEFAULT 'pr'",
         "actor": "VARCHAR(128) DEFAULT ''",
+        "verified_count": "INTEGER DEFAULT 0",
     }
     with engine.begin() as conn:
         for name, ddl in wanted.items():
@@ -336,7 +337,8 @@ def finish_run(
             run.finished_at = _utcnow()
             run.posted = len(result.posted)
             run.suppressed = len(result.suppressed)
-            run.killed_by_verifier = len(result.suppressed)
+            run.killed_by_verifier = len(result.refuted)
+            run.verified_count = result.verified_count
             run.input_tokens = u.input_tokens
             run.output_tokens = u.output_tokens
             run.cache_read_tokens = u.cache_read_input_tokens

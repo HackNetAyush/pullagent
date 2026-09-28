@@ -34,6 +34,9 @@ app.add_middleware(
 
 STALE_AFTER = timedelta(minutes=20)
 
+# A kill rate over a handful of findings says nothing. Do not flag below this.
+MIN_KILL_RATE_SAMPLE = 20
+
 
 def _run_json(r: Run) -> dict[str, Any]:
     started = r.created_at.replace(tzinfo=UTC) if r.created_at else None
@@ -86,6 +89,7 @@ def overview(days: int = 30) -> dict[str, Any]:
 
         posted = sum(r.posted for r in done)
         killed = sum(r.killed_by_verifier for r in done)
+        judged = sum(r.verified_count or (r.posted + r.killed_by_verifier) for r in done)
         cost = sum(r.cost_usd for r in done)
         cache_read = sum(r.cache_read_tokens for r in done)
         cache_all = cache_read + sum(r.cache_write_tokens + r.input_tokens for r in done)
@@ -127,7 +131,13 @@ def overview(days: int = 30) -> dict[str, Any]:
             "active": active,
             "posted": posted,
             "killed": killed,
-            "kill_rate": killed / (posted + killed) if (posted + killed) else 0.0,
+                # Denominator is findings the verifier judged, not everything we
+            # declined to post. Budget trims were confirmed real.
+            "kill_rate": killed / judged if judged else 0.0,
+            "kill_rate_sample": judged,
+            # Below this the rate is noise: three small reviews is not evidence
+            # that the verifier is rubber-stamping.
+            "kill_rate_reliable": judged >= MIN_KILL_RATE_SAMPLE,
             "cost": round(cost, 4),
             "cost_per_review": round(cost / len(done), 4) if done else 0.0,
             "cache_hit": cache_read / cache_all if cache_all else 0.0,

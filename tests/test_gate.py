@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from cr.config import TIERS, settings
 from cr.diff import DiffSet, FileDiff
 from cr.models import Category, Evidence, Finding, Severity, Verdict, VerifiedFinding
@@ -132,18 +134,23 @@ def test_comment_budget_caps_output_and_keeps_the_best() -> None:
             ]
         )
     ]
-    posted, suppressed = gate(items, tier)
+    g = gate(items, tier)
+    posted = g.posted
     assert len(posted) == 3
-    assert len(suppressed) == 2
+    # Budget trims are NOT verifier kills: these were confirmed real and dropped
+    # for space. Conflating them made the kill-rate metric meaningless.
+    assert len(g.budget_trimmed) == 2
+    assert g.refuted == []
     # Ranked by confidence x severity weight, best first.
     assert posted[0].finding.claim == "bug 1"  # 0.9 * critical
     assert posted[1].finding.claim == "bug 3"  # 0.95 * high
 
 
-def test_killed_findings_are_reported_as_suppressed_not_dropped() -> None:
-    posted, suppressed = gate([_verified([True, True])], TIERS["T2"])
-    assert posted == []
-    assert len(suppressed) == 1
+def test_refuted_findings_are_reported_not_dropped() -> None:
+    g = gate([_verified([True, True])], TIERS["T2"])
+    assert g.posted == []
+    assert len(g.refuted) == 1
+    assert g.budget_trimmed == []
 
 
 def test_paraphrases_of_one_defect_collapse() -> None:
@@ -167,3 +174,28 @@ def test_distinct_defects_in_one_file_both_survive() -> None:
     b = _finding("null deref", line=200)
     kept, _ = prefilter([a, b], settings)
     assert len(kept) == 2
+
+
+def test_kill_rate_excludes_budget_trims() -> None:
+    """The metric that regressed: `suppressed` mixed verifier kills with budget
+    trims and memory suppressions, so 'verifier kill rate' actually measured
+    'anything we did not post'."""
+    from cr.models import ReviewResult
+
+    r = ReviewResult(
+        tier="T2",
+        posted=[_verified([False])] * 6,
+        refuted=[_verified([True])] * 2,
+        budget_trimmed=[_verified([False])] * 4,
+        memory_suppressed=[_verified([False])] * 3,
+    )
+    # 2 refuted out of 12 judged (6 posted + 2 refuted + 4 trimmed).
+    assert r.verified_count == 12
+    assert r.verifier_kill_rate == pytest.approx(2 / 12)
+    # The old formula counted all 9 non-posted against 15 -> 60%, a different metric.
+
+
+def test_kill_rate_is_zero_with_nothing_judged() -> None:
+    from cr.models import ReviewResult
+
+    assert ReviewResult(tier="T1").verifier_kill_rate == 0.0

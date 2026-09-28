@@ -52,6 +52,8 @@ export interface Overview {
   posted: number;
   killed: number;
   kill_rate: number;
+  kill_rate_sample: number;
+  kill_rate_reliable: boolean;
   cost: number;
   cost_per_review: number;
   cache_hit: number;

@@ -55,19 +55,20 @@ def test_gate_drops_suppressed_findings() -> None:
     vf = _vf()
     fp = vf.finding.fingerprint()
 
-    posted, _ = gate([vf], TIERS["T2"], set())
-    assert len(posted) == 1
+    assert len(gate([vf], TIERS["T2"], set()).posted) == 1
 
-    posted, suppressed = gate([vf], TIERS["T2"], {fp})
-    assert posted == []
-    assert len(suppressed) == 1
+    g = gate([vf], TIERS["T2"], {fp})
+    assert g.posted == []
+    # Memory suppression is its own bucket — it must not inflate the kill rate.
+    assert len(g.memory_suppressed) == 1
+    assert g.refuted == []
 
 
 def test_suppression_does_not_hide_a_different_finding() -> None:
     """Fingerprints are per claim+location; suppressing one must not blanket a file."""
     a, b = _vf("off-by-one", 10), _vf("null deref", 40)
-    posted, _ = gate([a, b], TIERS["T2"], {a.finding.fingerprint()})
-    assert [v.finding.claim for v in posted] == ["null deref"]
+    g = gate([a, b], TIERS["T2"], {a.finding.fingerprint()})
+    assert [v.finding.claim for v in g.posted] == ["null deref"]
 
 
 def test_stats_counts_runs_and_suppressions(url) -> None:

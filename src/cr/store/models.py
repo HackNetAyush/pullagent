@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now() -> datetime:
@@ -59,6 +59,8 @@ class Run(Base):
     posted: Mapped[int] = mapped_column(Integer, default=0)
     suppressed: Mapped[int] = mapped_column(Integer, default=0)
     killed_by_verifier: Mapped[int] = mapped_column(Integer, default=0)
+    # Denominator for kill rate: findings the verifier actually judged.
+    verified_count: Mapped[int] = mapped_column(Integer, default=0)
 
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)

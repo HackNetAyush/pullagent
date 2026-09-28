@@ -183,13 +183,31 @@ class Usage(BaseModel):
 class ReviewResult(BaseModel):
     tier: str
     posted: list[VerifiedFinding] = Field(default_factory=list)
+    # Everything not posted, for display. The three reasons below are disjoint
+    # and must stay separate: lumping them together makes the kill rate mean
+    # "anything we did not show you", which is a different metric entirely.
     suppressed: list[VerifiedFinding] = Field(default_factory=list)
+    refuted: list[VerifiedFinding] = Field(default_factory=list)
+    memory_suppressed: list[VerifiedFinding] = Field(default_factory=list)
+    budget_trimmed: list[VerifiedFinding] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     elapsed_s: float = 0.0
 
     @property
+    def verified_count(self) -> int:
+        """Findings the verifier actually judged — the denominator for kill rate.
+
+        Budget trims are NOT included: those were confirmed real and dropped for
+        space, so counting them as kills understates the verifier's pass rate.
+        """
+        return len(self.posted) + len(self.refuted) + len(self.budget_trimmed)
+
+    @property
     def verifier_kill_rate(self) -> float:
-        """Watch this from day one. Below 0.4 the verifier is rubber-stamping;
-        above 0.6 the finders are too noisy. It tells you which half to fix."""
-        total = len(self.posted) + len(self.suppressed)
-        return len(self.suppressed) / total if total else 0.0
+        """Share of judged findings the verifier refuted.
+
+        Below 0.4 suggests rubber-stamping; above 0.6 suggests noisy finders.
+        Both readings need a meaningful sample — see MIN_KILL_RATE_SAMPLE.
+        """
+        total = self.verified_count
+        return len(self.refuted) / total if total else 0.0
