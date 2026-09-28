@@ -60,7 +60,16 @@ T3_VERIFIER_MODEL = "claude-opus-5"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CR_", env_file=".env", extra="ignore")
 
+    # "anthropic" (first-party API) or "foundry" (Claude on Microsoft Foundry).
+    provider: str = "anthropic"
+
     anthropic_api_key: str | None = None
+
+    # Microsoft Foundry. Set CR_AZURE_RESOURCE for the standard endpoint shape,
+    # or CR_AZURE_BASE_URL to point at it directly.
+    azure_api_key: str | None = None
+    azure_resource: str | None = None
+    azure_base_url: str | None = None
 
     # Triage thresholds (hunks/files, deliberately NOT token counts — routing must
     # not depend on which model's tokenizer you would have used).

@@ -7,9 +7,26 @@ branding:
   color: "purple"
 
 inputs:
+  provider:
+    description: "anthropic | foundry"
+    required: false
+    default: "anthropic"
   anthropic-api-key:
-    description: "Anthropic API key."
-    required: true
+    description: "Anthropic API key (provider=anthropic)."
+    required: false
+    default: ""
+  azure-api-key:
+    description: "Microsoft Foundry API key (provider=foundry)."
+    required: false
+    default: ""
+  azure-resource:
+    description: "Foundry resource name (provider=foundry)."
+    required: false
+    default: ""
+  azure-base-url:
+    description: "Foundry endpoint URL, instead of azure-resource."
+    required: false
+    default: ""
   github-token:
     description: "Token used to read the PR and post the review."
     required: false
@@ -38,7 +55,11 @@ runs:
     - name: Review
       shell: bash
       env:
+        CR_PROVIDER: ${{ inputs.provider }}
         CR_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        CR_AZURE_API_KEY: ${{ inputs.azure-api-key }}
+        CR_AZURE_RESOURCE: ${{ inputs.azure-resource }}
+        CR_AZURE_BASE_URL: ${{ inputs.azure-base-url }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         args=()

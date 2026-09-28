@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, AsyncAnthropicFoundry
 from pydantic import BaseModel
 
 from cr.models import Usage
@@ -49,11 +49,54 @@ class Call:
     label: str = ""
 
 
+def build_client(settings: Any) -> Any:
+    """Pick the transport. Both speak the identical Messages API surface, so
+    nothing downstream of this function knows or cares which one it got.
+
+    Claude on Microsoft Foundry keeps every capability this design depends on —
+    explicit `cache_control` breakpoints, structured outputs, and the effort
+    ladder — so the cached-prefix architecture survives the move intact. The one
+    real loss is the Batch API, which Foundry does not offer (BACKLOG.md CR-32
+    becomes first-party-only).
+    """
+    provider = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
+
+    if provider == "foundry":
+        if not settings.azure_api_key:
+            raise ValueError("CR_AZURE_API_KEY is required when CR_PROVIDER=foundry")
+        if not (settings.azure_resource or settings.azure_base_url):
+            raise ValueError("Set CR_AZURE_RESOURCE (or CR_AZURE_BASE_URL) for Foundry")
+        kwargs: dict[str, Any] = {"api_key": settings.azure_api_key}
+        if settings.azure_base_url:
+            kwargs["base_url"] = settings.azure_base_url
+        else:
+            kwargs["resource"] = settings.azure_resource
+        log.info("using Microsoft Foundry (%s)", settings.azure_resource or settings.azure_base_url)
+        return AsyncAnthropicFoundry(**kwargs)
+
+    if provider != "anthropic":
+        raise ValueError(
+            f"Unknown CR_PROVIDER={provider!r}. Supported: 'anthropic', 'foundry'."
+        )
+
+    key = settings.anthropic_api_key
+    return AsyncAnthropic(api_key=key) if key else AsyncAnthropic()
+
+
 class LLMClient:
     """Thin wrapper. One instance per review run."""
 
-    def __init__(self, api_key: str | None = None, *, max_concurrency: int = 8) -> None:
-        self._client = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        max_concurrency: int = 8,
+        client: Any | None = None,
+    ) -> None:
+        if client is not None:
+            self._client = client
+        else:
+            self._client = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
         self._sem = asyncio.Semaphore(max_concurrency)
         self.usage = Usage()
 
