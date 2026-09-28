@@ -49,6 +49,70 @@ class Call:
     label: str = ""
 
 
+class ClientPool:
+    """Routes each model to the transport configured for it.
+
+    Most setups have one endpoint and one key, in which case every model resolves
+    to the same client and this is a no-op. It exists because Foundry deployments
+    can legitimately sit behind different resources or projects, and discovering
+    that mid-review is unpleasant.
+    """
+
+    def __init__(self, default: Any, by_model: dict[str, Any] | None = None) -> None:
+        self._default = default
+        self._by_model = by_model or {}
+
+    def for_model(self, model: str) -> Any:
+        return self._by_model.get(model, self._default)
+
+    @property
+    def endpoints(self) -> dict[str, Any]:
+        """Distinct clients, keyed by the model that selects them. Used by doctor."""
+        out = dict(self._by_model)
+        out.setdefault("(default)", self._default)
+        return out
+
+
+def _foundry(api_key: str | None, base_url: str | None, resource: str | None) -> Any:
+    if not api_key:
+        raise ValueError("CR_AZURE_API_KEY is required when CR_PROVIDER=foundry")
+    if not (resource or base_url):
+        raise ValueError("Set CR_AZURE_RESOURCE (or CR_AZURE_BASE_URL) for Foundry")
+    kwargs: dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    else:
+        kwargs["resource"] = resource
+    return AsyncAnthropicFoundry(**kwargs)
+
+
+def build_pool(settings: Any) -> ClientPool:
+    """Build the per-model transport map from settings."""
+    provider = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
+    if provider != "foundry":
+        return ClientPool(build_client(settings))
+
+    finder_models = {settings.model_small, settings.model_standard, settings.model_deep}
+
+    default = _foundry(settings.azure_api_key, settings.azure_base_url, settings.azure_resource)
+
+    by_model: dict[str, Any] = {}
+    for role, models in (
+        ("finder", finder_models),
+        ("verifier", {settings.model_verifier}),
+    ):
+        base, key = settings.endpoint_for(role)
+        # Only build a separate client when this role actually differs.
+        if (base, key) == (settings.azure_base_url, settings.azure_api_key):
+            continue
+        client = _foundry(key, base, settings.azure_resource)
+        for m in models:
+            by_model[m] = client
+        log.info("role %s uses a dedicated endpoint (%s)", role, base or settings.azure_resource)
+
+    return ClientPool(default, by_model)
+
+
 def build_client(settings: Any) -> Any:
     """Pick the transport. Both speak the identical Messages API surface, so
     nothing downstream of this function knows or cares which one it got.
@@ -92,13 +156,20 @@ class LLMClient:
         *,
         max_concurrency: int = 8,
         client: Any | None = None,
+        pool: ClientPool | None = None,
     ) -> None:
-        if client is not None:
-            self._client = client
+        if pool is not None:
+            self._pool = pool
+        elif client is not None:
+            self._pool = ClientPool(client)
         else:
-            self._client = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
+            base = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
+            self._pool = ClientPool(base)
         self._sem = asyncio.Semaphore(max_concurrency)
         self.usage = Usage()
+
+    def _for(self, model: str) -> Any:
+        return self._pool.for_model(model)
 
     def _track(self, raw: Any) -> Usage:
         u = Usage(
@@ -116,7 +187,7 @@ class LLMClient:
         Singleflight this per repo — see PIPELINE.md §4.2.
         """
         async with self._sem:
-            resp = await self._client.messages.create(model=model, **payload)
+            resp = await self._for(model).messages.create(model=model, **payload)
         u = self._track(resp.usage)
         log.info("prewarm model=%s cache_write=%d", model, u.cache_creation_input_tokens)
         return u
@@ -140,7 +211,7 @@ class LLMClient:
         into visible text as prose, and the call silently never runs).
         """
         async with self._sem:
-            resp = await self._client.messages.parse(
+            resp = await self._for(model).messages.parse(
                 model=model,
                 max_tokens=max_tokens,
                 output_format=schema,
@@ -192,7 +263,7 @@ class LLMClient:
 
         async def _first() -> Call:
             try:
-                async with self._sem, self._client.messages.stream(
+                async with self._sem, self._for(model).messages.stream(
                     model=model,
                     max_tokens=max_tokens,
                     output_format=schema,

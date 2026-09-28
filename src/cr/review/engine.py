@@ -12,7 +12,7 @@ import time
 
 from cr.config import T3_VERIFIER_MODEL, Settings, TierConfig
 from cr.config import settings as default_settings
-from cr.llm.client import LLMClient, build_client
+from cr.llm.client import LLMClient, build_pool
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
 from cr.models import Finding, FindingList, ReviewResult, Verdict, VerifiedFinding
 from cr.review import prompts
@@ -158,7 +158,7 @@ async def review(
     cfg: Settings | None = None,
 ) -> ReviewResult:
     s = cfg or default_settings
-    llm = client or LLMClient(client=build_client(s))
+    llm = client or LLMClient(pool=build_pool(s))
     started = time.monotonic()
 
     builder = PrefixBuilder(preamble=prompts.PREAMBLE, repo=repo, pr=pr)

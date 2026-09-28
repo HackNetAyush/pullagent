@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PLACEHOLDER = "<<< FILL ME >>>"
 
 
 class TierConfig(BaseModel):
@@ -17,62 +17,6 @@ class TierConfig(BaseModel):
     max_comments: int
 
 
-def _model(env_var: str, default: str) -> str:
-    """Model IDs are env-overridable because Microsoft Foundry routes by
-    *deployment name*, which may not match the canonical model ID."""
-    return os.environ.get(env_var, "").strip() or default
-
-
-# Defaults assume Claude Sonnet 5 and Opus 5 are available. There is deliberately
-# no Haiku tier: not every deployment has one, and Sonnet at effort=low is close
-# enough in cost while removing a model from the required set.
-MODEL_SMALL = _model("CR_MODEL_SMALL", "claude-sonnet-5")
-MODEL_STANDARD = _model("CR_MODEL_STANDARD", "claude-sonnet-5")
-MODEL_DEEP = _model("CR_MODEL_DEEP", "claude-sonnet-5")
-
-# T3 escalates verification only — the finders stay on the cheaper model.
-T3_VERIFIER_MODEL = _model("CR_MODEL_VERIFIER", "claude-opus-5")
-
-
-# ARCHITECTURE.md §3.2. Costs in PIPELINE.md §2.1 assume prompt caching is working.
-TIERS: dict[str, TierConfig] = {
-    # Small, low-blast-radius changes.
-    "T1": TierConfig(
-        name="T1",
-        model=MODEL_SMALL,
-        effort="low",
-        finders=["correctness"],
-        verifier_lenses=["evidence"],
-        max_comments=3,
-    ),
-    # ~$0.23 — the 80% case.
-    "T2": TierConfig(
-        name="T2",
-        model=MODEL_STANDARD,
-        effort="high",
-        finders=["correctness", "api_contract", "test_coverage"],
-        verifier_lenses=["correctness", "reachability"],
-        max_comments=6,
-    ),
-    # ~$0.50 — auth, payments, migrations, concurrency, or very large diffs.
-    "T3": TierConfig(
-        name="T3",
-        model=MODEL_DEEP,
-        effort="xhigh",
-        finders=[
-            "correctness",
-            "security",
-            "concurrency",
-            "api_contract",
-            "test_coverage",
-            "performance",
-        ],
-        verifier_lenses=["correctness", "reachability", "evidence"],
-        max_comments=8,
-    ),
-}
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CR_", env_file=".env", extra="ignore")
 
@@ -81,11 +25,32 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
 
-    # Microsoft Foundry. Set CR_AZURE_RESOURCE for the standard endpoint shape,
-    # or CR_AZURE_BASE_URL to point at it directly.
+    # Microsoft Foundry, shared credentials. Set CR_AZURE_RESOURCE for the
+    # standard endpoint shape, or CR_AZURE_BASE_URL to point at it directly.
     azure_api_key: str | None = None
     azure_resource: str | None = None
     azure_base_url: str | None = None
+
+    # Per-role overrides, for when deployments sit behind different endpoints or
+    # keys. Blank values fall back to the shared ones above, so the common
+    # single-resource case needs none of these.
+    finder_base_url: str | None = None
+    finder_api_key: str | None = None
+    verifier_base_url: str | None = None
+    verifier_api_key: str | None = None
+
+    # Model identifiers. These must live on Settings rather than being read from
+    # os.environ directly: pydantic-settings loads .env into *this object*, not
+    # into the process environment, so an os.environ lookup would silently ignore
+    # every override written in .env.
+    #
+    # On Foundry these are DEPLOYMENT names, which need not match canonical model
+    # IDs. There is deliberately no Haiku tier — not every deployment has one, and
+    # Sonnet at effort=low is close enough in cost without adding a required model.
+    model_small: str = "claude-sonnet-5"
+    model_standard: str = "claude-sonnet-5"
+    model_deep: str = "claude-sonnet-5"
+    model_verifier: str = "claude-opus-5"
 
     # Triage thresholds (hunks/files, deliberately NOT token counts — routing must
     # not depend on which model's tokenizer you would have used).
@@ -136,5 +101,71 @@ class Settings(BaseSettings):
     # Findings below this confidence are dropped before verification.
     min_confidence: float = 0.35
 
+    def endpoint_for(self, role: str) -> tuple[str | None, str | None]:
+        """Return (base_url, api_key) for 'finder' or 'verifier', with fallback."""
+        base = getattr(self, f"{role}_base_url", None) or self.azure_base_url
+        key = getattr(self, f"{role}_api_key", None) or self.azure_api_key
+        return base, key
+
+    def unfilled(self) -> list[str]:
+        """Settings still holding the .env template placeholder.
+
+        Worth reporting explicitly: a placeholder key produces an authentication
+        error that reads like a broken endpoint, which sends you debugging the
+        wrong thing.
+        """
+        out = []
+        for name in ("azure_api_key", "azure_resource", "azure_base_url", "anthropic_api_key"):
+            value = getattr(self, name, None)
+            if value and PLACEHOLDER.strip("<> ") in str(value):
+                out.append(f"CR_{name.upper()}")
+        return out
+
 
 settings = Settings()
+
+
+def build_tiers(s: Settings) -> dict[str, TierConfig]:
+    """ARCHITECTURE.md §3.2. Costs in PIPELINE.md §2.1 assume caching is working."""
+    return {
+        # Small, low-blast-radius changes.
+        "T1": TierConfig(
+            name="T1",
+            model=s.model_small,
+            effort="low",
+            finders=["correctness"],
+            verifier_lenses=["evidence"],
+            max_comments=3,
+        ),
+        # ~$0.23 — the 80% case.
+        "T2": TierConfig(
+            name="T2",
+            model=s.model_standard,
+            effort="high",
+            finders=["correctness", "api_contract", "test_coverage"],
+            verifier_lenses=["correctness", "reachability"],
+            max_comments=6,
+        ),
+        # ~$0.50 — auth, payments, migrations, concurrency, or very large diffs.
+        "T3": TierConfig(
+            name="T3",
+            model=s.model_deep,
+            effort="xhigh",
+            finders=[
+                "correctness",
+                "security",
+                "concurrency",
+                "api_contract",
+                "test_coverage",
+                "performance",
+            ],
+            verifier_lenses=["correctness", "reachability", "evidence"],
+            max_comments=8,
+        ),
+    }
+
+
+TIERS: dict[str, TierConfig] = build_tiers(settings)
+
+# T3 escalates verification only — the finders stay on the cheaper model.
+T3_VERIFIER_MODEL = settings.model_verifier

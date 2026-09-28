@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel
 
 from cr.config import Settings
-from cr.llm.client import LLMClient, build_client
+from cr.llm.client import LLMClient, build_pool
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
 
 # The cacheable prefix minimum is 1024 tokens on Sonnet 5, so a probe has to be
@@ -72,8 +72,18 @@ def _builder() -> PrefixBuilder:
 async def _probe(settings: Settings, model: str) -> DoctorReport:
     r = DoctorReport(provider=settings.provider, model=model)
 
+    unfilled = settings.unfilled()
+    if unfilled:
+        r.errors.append(
+            "Still on the .env template placeholder: "
+            + ", ".join(unfilled)
+            + ". Fill these in before probing — a placeholder key surfaces as an "
+            "authentication error that reads like a broken endpoint."
+        )
+        return r
+
     try:
-        client = LLMClient(client=build_client(settings), max_concurrency=2)
+        client = LLMClient(pool=build_pool(settings), max_concurrency=2)
     except ValueError as e:
         r.errors.append(str(e))
         return r
