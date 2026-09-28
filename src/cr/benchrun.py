@@ -131,7 +131,11 @@ async def run_pr(
     )
 
     result = await run_review(
-        repo=RepoContext(slug=slug), pr=pr_ctx, tier=tier, remember=False
+        repo=RepoContext(slug=slug),
+        pr=pr_ctx,
+        tier=tier,
+        remember=False,
+        source="bench",
     )
     res.posted = len(result.posted)
     res.cost = result.usage.cost_usd(*RATES.get(tier.model, (3.0, 15.0)))

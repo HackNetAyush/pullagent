@@ -48,6 +48,8 @@ def _run_json(r: Run) -> dict[str, Any]:
         "pr": r.pr_number,
         "tier": r.tier,
         "model": r.model,
+        "source": r.source,
+        "actor": r.actor or "",
         "status": "stalled" if stalled else r.status,
         "stage": r.stage,
         "stage_index": r.stage_index,
@@ -107,6 +109,10 @@ def overview(days: int = 30) -> dict[str, Any]:
                 .group_by(FindingRow.severity)
             ).all()
         )
+        by_source: dict[str, float] = {}
+        for r in done:
+            by_source[r.source] = round(by_source.get(r.source, 0.0) + r.cost_usd, 4)
+
         by_model = dict(
             s.execute(
                 select(Run.model, func.sum(Run.cost_usd))
@@ -133,6 +139,7 @@ def overview(days: int = 30) -> dict[str, Any]:
             ],
             "severity": severity,
             "cost_by_model": {k: round(v, 4) for k, v in by_model.items()},
+            "cost_by_source": by_source,
         }
 
 

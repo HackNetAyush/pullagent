@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> datetime:
@@ -42,6 +42,13 @@ class Run(Base):
     head_sha: Mapped[str] = mapped_column(String(64), default="")
     tier: Mapped[str] = mapped_column(String(8), default="")
     model: Mapped[str] = mapped_column(String(64), default="")
+
+    # Where the run came from: pr | local | eval | bench. Without this the ledger
+    # cannot tell a paid customer review from a benchmark sweep.
+    source: Mapped[str] = mapped_column(String(16), default="pr", index=True)
+    # Reserved for auth. Null until there is an identity to attribute a run to;
+    # the column exists now so adding auth is not a migration.
+    actor: Mapped[str] = mapped_column(String(128), default="", index=True)
 
     status: Mapped[str] = mapped_column(String(16), default="running", index=True)
     stage: Mapped[str] = mapped_column(String(32), default="queued")

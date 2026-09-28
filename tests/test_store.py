@@ -93,3 +93,30 @@ def test_store_failure_never_breaks_a_review() -> None:
     store.reset_for_tests()
     assert store.suppressed_fingerprints("acme/api", "postgresql://nobody@127.0.0.1:1/x") == set()
     store.reset_for_tests()
+
+
+def test_every_source_lands_in_the_ledger(url) -> None:
+    """The ledger lives in the engine so no command can forget to record. This
+    guards the regression where only `review-pr` wrote and local reviews, evals
+    and benchmarks were invisible — a 15x undercount of real spend."""
+    from cr.models import ReviewResult, Usage
+
+    for src in ("pr", "local", "eval", "bench"):
+        rid = store.start_run("acme/api", tier="T2", model="m", source=src, url=url)
+        assert rid is not None
+        store.finish_run(
+            rid, ReviewResult(tier="T2", usage=Usage(output_tokens=100)), cost=0.10, url=url
+        )
+
+    d = store.stats("acme/api", url)
+    assert d["runs"] == 4
+    assert d["cost_usd"] == pytest.approx(0.40)
+
+
+def test_actor_column_exists_for_auth(url) -> None:
+    """Reserved now so adding auth is not a schema migration."""
+    from cr.store.models import Run
+
+    rid = store.start_run("acme/api", tier="T1", model="m", actor="user:42", url=url)
+    with store.session(url) as s:
+        assert s.get(Run, rid).actor == "user:42"

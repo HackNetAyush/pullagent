@@ -143,7 +143,11 @@ async def _one_run(
     # Suppression memory is deliberately off: an eval must measure the reviewer,
     # not whatever a human happened to dismiss on this PR earlier.
     return await run_review(
-        repo=RepoContext(slug=ref.slug), pr=pr_ctx, tier=tier, remember=False
+        repo=RepoContext(slug=ref.slug),
+        pr=pr_ctx,
+        tier=tier,
+        remember=False,
+        source="eval",
     )
 
 

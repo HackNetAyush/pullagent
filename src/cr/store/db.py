@@ -38,6 +38,7 @@ def init(url: str | None = None) -> sessionmaker[Session]:
 
     _ENGINE = create_engine(url, future=True)
     Base.metadata.create_all(_ENGINE)
+    _add_missing_columns(_ENGINE)
     _SESSION = sessionmaker(bind=_ENGINE, future=True)
 
     with _SESSION() as s:
@@ -46,8 +47,32 @@ def init(url: str | None = None) -> sessionmaker[Session]:
             s.add(Meta(key="schema_version", value=str(SCHEMA_VERSION)))
             s.commit()
         elif row.value != str(SCHEMA_VERSION):
-            log.warning("store schema is v%s, code expects v%s", row.value, SCHEMA_VERSION)
+            # _add_missing_columns has already run, so the database now matches.
+            # Stamp it, or every future start-up warns about a resolved gap.
+            log.info("store migrated v%s -> v%s", row.value, SCHEMA_VERSION)
+            row.value = str(SCHEMA_VERSION)
+            s.commit()
     return _SESSION
+
+
+def _add_missing_columns(engine) -> None:
+    """create_all never alters an existing table, so a new column would break
+    every query against a database created by an older version. Add them."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "runs" not in insp.get_table_names():
+        return
+    have = {c["name"] for c in insp.get_columns("runs")}
+    wanted = {
+        "source": "VARCHAR(16) DEFAULT 'pr'",
+        "actor": "VARCHAR(128) DEFAULT ''",
+    }
+    with engine.begin() as conn:
+        for name, ddl in wanted.items():
+            if name not in have:
+                conn.execute(text(f"ALTER TABLE runs ADD COLUMN {name} {ddl}"))
+                log.info("store: added runs.%s", name)
 
 
 def reset_for_tests() -> None:
@@ -248,6 +273,8 @@ def start_run(
     model: str,
     pr_number: int | None = None,
     head_sha: str = "",
+    source: str = "pr",
+    actor: str = "",
     url: str | None = None,
 ) -> int | None:
     """Create the row a dashboard watches while the review is in flight."""
@@ -259,6 +286,8 @@ def start_run(
                 head_sha=head_sha,
                 tier=tier,
                 model=model,
+                source=source,
+                actor=actor,
                 status="running",
                 stage="triage",
                 stage_index=0,

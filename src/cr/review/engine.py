@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from cr.config import T3_VERIFIER_MODEL, Settings, TierConfig
 from cr.config import settings as default_settings
-from cr.llm.client import LLMClient, build_pool
+from cr.llm.client import RATES, LLMClient, build_pool
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
 from cr.models import Finding, FindingList, ReviewResult, Verdict, VerifiedFinding
 from cr.review import prompts
@@ -192,16 +192,45 @@ async def review(
     cfg: Settings | None = None,
     remember: bool = True,
     on_stage: Callable[[str], None] | None = None,
+    record: bool = True,
+    source: str = "pr",
+    pr_number: int | None = None,
+    head_sha: str = "",
+    actor: str = "",
 ) -> ReviewResult:
     s = cfg or default_settings
     llm = client or LLMClient(pool=build_pool(s))
     started = time.monotonic()
 
-    builder = PrefixBuilder(preamble=prompts.PREAMBLE, repo=repo, pr=pr)
-    emit = on_stage or (lambda _s: None)
+    # The ledger lives here rather than in each command, so a new caller cannot
+    # forget to record and silently vanish from the dashboard.
+    run_id = (
+        store.start_run(
+            repo.slug,
+            tier=tier.name,
+            model=tier.model,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            source=source,
+            actor=actor,
+        )
+        if record
+        else None
+    )
 
-    emit("find")
-    raw = await find(llm, builder, tier)
+    def emit(stage: str) -> None:
+        store.set_stage(run_id, stage)
+        if on_stage:
+            on_stage(stage)
+
+    builder = PrefixBuilder(preamble=prompts.PREAMBLE, repo=repo, pr=pr)
+
+    try:
+        emit("find")
+        raw = await find(llm, builder, tier)
+    except Exception as exc:
+        store.finish_run(run_id, ReviewResult(tier=tier.name), cost=0.0, error=str(exc))
+        raise
     log.info("found %d raw findings", len(raw))
 
     emit("prefilter")
@@ -217,10 +246,14 @@ async def review(
     if fps:
         store.bump_hits(repo.slug, {v.finding.fingerprint() for v in suppressed} & fps)
 
-    return ReviewResult(
+    result = ReviewResult(
         tier=tier.name,
         posted=posted,
         suppressed=suppressed,
         usage=llm.usage,
         elapsed_s=time.monotonic() - started,
     )
+    store.finish_run(
+        run_id, result, cost=result.usage.cost_usd(*RATES.get(tier.model, (3.0, 15.0)))
+    )
+    return result
