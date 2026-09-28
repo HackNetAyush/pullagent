@@ -22,7 +22,7 @@ from rich.table import Table
 from cr import bench as bm
 from cr import benchrun as br
 from cr import evals as ev
-from cr.config import TIERS, settings
+from cr.config import T3_VERIFIER_MODEL, TIERS, settings
 from cr.diff import DiffSet, collect, parse
 from cr.doctor import run as doctor_run
 from cr.github import MARKER, GitHubPR, PRRef, build_review, pr_from_env
@@ -644,17 +644,25 @@ def bench_cmd(
 @app.command()
 def tiers() -> None:
     """Show the routing table."""
-    t = Table("tier", "model", "effort", "finders", "verifiers", "max comments")
+    t = Table("tier", "finder model", "verifier model", "effort", "finders", "verifiers", "max")
     for name, c in TIERS.items():
+        # Only T3 escalates verification; the finders stay on the cheaper model
+        # because verification is where correctness matters and outputs are small.
+        verifier = T3_VERIFIER_MODEL if name == "T3" else c.model
         t.add_row(
             name,
             c.model,
+            verifier + (" *" if verifier != c.model else ""),
             c.effort,
             str(len(c.finders)),
             str(len(c.verifier_lenses)),
             str(c.max_comments),
         )
     console.print(t)
+    console.print(
+        "[dim]T0 skips lockfiles and generated files entirely - no model call, $0.00.\n"
+        "* T3 escalates verification to a stronger model; finders stay cheaper.[/dim]"
+    )
 
 
 if __name__ == "__main__":
