@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DayPoint } from "./api";
 import { fmtUSD } from "./api";
 
@@ -18,14 +18,26 @@ export function CostChart({ data, height = 220 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
   const [width, setWidth] = useState(720);
+  const [settling, setSettling] = useState(false);
+  const prevDataRef = useRef(data);
 
-  useMemo(() => {
+  useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Rescaling the axes to new data is instant — a brief dip-and-recover fade
+  // reads as a smooth transition rather than the line jump-cutting in place.
+  useEffect(() => {
+    if (prevDataRef.current === data) return;
+    prevDataRef.current = data;
+    setSettling(true);
+    const timer = window.setTimeout(() => setSettling(false), 220);
+    return () => window.clearTimeout(timer);
+  }, [data]);
 
   const geom = useMemo(() => {
     const w = Math.max(320, width);
@@ -42,8 +54,9 @@ export function CostChart({ data, height = 220 }: Props) {
 
   if (!data.length) {
     return (
-      <div className="empty">
-        No spend recorded yet. Run <span className="mono">cr review-pr</span> and it lands here.
+      <div className="flex min-h-[236px] flex-col items-center justify-center text-center text-[11px] text-slate-400">
+        <strong className="font-display text-xs text-slate-700 dark:text-slate-200">No spend recorded yet</strong>
+        <span className="mt-1">Run <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-slate-800">cr review-pr</code> and it lands here.</span>
       </div>
     );
   }
@@ -58,8 +71,9 @@ export function CostChart({ data, height = 220 }: Props) {
   const hoveredPoint = hover !== null ? data[hover] : null;
 
   return (
-    <div className="chart-wrap" ref={wrapRef}>
+    <div className="relative min-w-0" ref={wrapRef}>
       <svg
+        className={`transition-opacity duration-200 ease-out ${settling ? "opacity-50" : "opacity-100"}`}
         width="100%"
         height={height}
         viewBox={`0 0 ${w} ${height}`}
@@ -76,8 +90,8 @@ export function CostChart({ data, height = 220 }: Props) {
       >
         <defs>
           <linearGradient id="costFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--series-1)" stopOpacity="0.22" />
-            <stop offset="100%" stopColor="var(--series-1)" stopOpacity="0.02" />
+            <stop offset="0%" stopColor="#6464dc" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="#6464dc" stopOpacity="0.02" />
           </linearGradient>
         </defs>
 
@@ -88,14 +102,14 @@ export function CostChart({ data, height = 220 }: Props) {
               x2={w - PAD.right}
               y1={y(t)}
               y2={y(t)}
-              stroke="var(--grid)"
+              className="stroke-slate-200 dark:stroke-slate-800"
               strokeWidth="1"
             />
             <text
               x={PAD.left - 8}
               y={y(t) + 4}
               textAnchor="end"
-              fill="var(--text-muted)"
+              className="fill-slate-400 dark:fill-slate-500"
               fontSize="11"
               style={{ fontVariantNumeric: "tabular-nums" }}
             >
@@ -108,7 +122,7 @@ export function CostChart({ data, height = 220 }: Props) {
         <path
           d={line}
           fill="none"
-          stroke="var(--series-1)"
+          stroke="#6464dc"
           strokeWidth="2"
           strokeLinejoin="round"
           strokeLinecap="round"
@@ -120,7 +134,7 @@ export function CostChart({ data, height = 220 }: Props) {
             x2={x(hover)}
             y1={PAD.top}
             y2={height - PAD.bottom}
-            stroke="var(--axis)"
+            className="stroke-slate-300 dark:stroke-slate-700"
             strokeWidth="1"
             strokeDasharray="3 3"
           />
@@ -132,8 +146,8 @@ export function CostChart({ data, height = 220 }: Props) {
             cx={x(hover)}
             cy={y(data[hover].cost)}
             r="5"
-            fill="var(--series-1)"
-            stroke="var(--surface)"
+            fill="#6464dc"
+            className="stroke-white dark:stroke-slate-900"
             strokeWidth="2"
           />
         )}
@@ -142,21 +156,21 @@ export function CostChart({ data, height = 220 }: Props) {
           cx={x(data.length - 1)}
           cy={y(last.cost)}
           r="4"
-          fill="var(--series-1)"
-          stroke="var(--surface)"
+          fill="#6464dc"
+          className="stroke-white dark:stroke-slate-900"
           strokeWidth="2"
         />
         <text
           x={x(data.length - 1) + 9}
           y={y(last.cost) + 4}
-          fill="var(--text-secondary)"
+          className="fill-slate-500 dark:fill-slate-400"
           fontSize="11.5"
           fontWeight="600"
         >
           {fmtUSD(last.cost)}
         </text>
 
-        <text x={PAD.left} y={height - 7} fill="var(--text-muted)" fontSize="11">
+        <text x={PAD.left} y={height - 7} className="fill-slate-400 dark:fill-slate-500" fontSize="11">
           {shortDate(data[0].date)}
         </text>
         {data.length > 1 && (
@@ -164,7 +178,7 @@ export function CostChart({ data, height = 220 }: Props) {
             x={w - PAD.right}
             y={height - 7}
             textAnchor="end"
-            fill="var(--text-muted)"
+            className="fill-slate-400 dark:fill-slate-500"
             fontSize="11"
           >
             {shortDate(last.date)}
@@ -174,15 +188,15 @@ export function CostChart({ data, height = 220 }: Props) {
 
       {hoveredPoint && (
         <div
-          className="tooltip"
+          className="pointer-events-none absolute z-10 min-w-[132px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[10px] shadow-xl dark:border-slate-700 dark:bg-slate-800"
           style={{
             left: Math.min(Math.max(0, (x(hover!) / w) * 100), 88) + "%",
             top: 6,
           }}
         >
-          <div className="t-date">{longDate(hoveredPoint.date)}</div>
-          <div className="t-val">{fmtUSD(hoveredPoint.cost)}</div>
-          <div style={{ color: "var(--text-secondary)", marginTop: 2 }}>
+          <div className="mb-1 text-slate-400">{longDate(hoveredPoint.date)}</div>
+          <div className="text-xs font-bold text-slate-900 dark:text-white">{fmtUSD(hoveredPoint.cost)}</div>
+          <div className="mt-0.5 text-slate-500 dark:text-slate-300">
             {hoveredPoint.runs} review{hoveredPoint.runs === 1 ? "" : "s"} ·{" "}
             {hoveredPoint.posted} comment{hoveredPoint.posted === 1 ? "" : "s"}
           </div>

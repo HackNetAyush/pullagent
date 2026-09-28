@@ -19,6 +19,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from cr import bench as bm
+from cr import benchrun as br
 from cr import evals as ev
 from cr.config import TIERS, settings
 from cr.diff import DiffSet, collect, parse
@@ -543,6 +545,95 @@ def serve(
 
     console.print(f"[green]http://{host}:{port}[/green]  [dim]API docs at /api/docs[/dim]")
     uvicorn.run("cr.server:app", host=host, port=port, log_level="warning")
+
+
+@app.command("bench-mine")
+def bench_mine(
+    slug: Annotated[str, typer.Argument(help="owner/repo")],
+    prs: Annotated[int, typer.Option("--prs", help="How many merged PRs to mine")] = 10,
+    per_pr: Annotated[int, typer.Option("--per-pr", help="Max comments per PR")] = 2,
+    directory: Annotated[Path, typer.Option("--dir")] = Path("evals/fixtures"),
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Mine human review comments from merged PRs into a benchmark fixture.
+
+    Ground truth is what human reviewers flagged (c-CRAB methodology), recorded
+    against the exact commit they were looking at.
+    """
+    _setup_logging(verbose)
+    token = settings.github_token
+    if not token:
+        console.print("[red]GITHUB_TOKEN is not set.[/red]")
+        raise typer.Exit(2)
+
+    console.print(f"[dim]Mining {slug}...[/dim]")
+    found = bm.mine(slug, token, limit_prs=prs, max_comments_per_pr=per_pr)
+    if not found:
+        console.print("[yellow]No substantive human review comments found.[/yellow]")
+        raise typer.Exit(1)
+
+    fixture = bm.to_fixture(slug, found, f"{slug} — human review benchmark")
+    path = bm.save_fixture(fixture, directory)
+
+    t = Table("PR", "file", "reviewer", "comment")
+    for e in fixture["prs"]:
+        for h in e["human_reviews"]:
+            t.add_row(e["pr"].split("#")[1], (h["file"] or "")[-34:], h["author"],
+                      h["comment"][:58] + "...")
+    console.print(t)
+    console.print(
+        f"[green]{len(found)} comments across "
+        f"{len(fixture['prs'])} PRs[/green] -> {path}"
+    )
+
+
+@app.command("bench")
+def bench_cmd(
+    fixture: Annotated[Path, typer.Argument(help="Fixture JSON from bench-mine")],
+    limit: Annotated[int | None, typer.Option("--limit", "-n", help="Only the first N PRs")] = None,
+    tier: Annotated[str, typer.Option("--tier", "-t")] = "T2",
+    no_graph: Annotated[bool, typer.Option("--no-graph")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Score the reviewer against human reviewers on real merged PRs.
+
+    Each PR is reviewed at the commit the human was looking at, then an LLM judge
+    decides whether we raised the same concern.
+    """
+    _setup_logging(verbose)
+    _require_credentials()
+
+    summary, results = br.run_benchmark(
+        fixture, settings, tier_name=tier, limit=limit, use_graph=not no_graph
+    )
+
+    t = Table("PR", "human", "matched", "posted", "cost", "note")
+    for r in results:
+        t.add_row(
+            r.pr.split("#")[1],
+            str(r.expected),
+            "-" if r.skipped else f"{r.matched}/{r.expected}",
+            "-" if r.skipped else str(r.posted),
+            f"${r.cost:.3f}",
+            r.skipped[:38] or "",
+        )
+    console.print(t)
+
+    s = Table(show_header=False, box=None, padding=(0, 2))
+    s.add_row("PRs scored", f"{summary['prs_scored']} of {summary['prs_attempted']}")
+    s.add_row("human comments", str(summary["human_comments"]))
+    s.add_row("agreed with human", f"{summary['matched']} ({summary['recall']:.0%})")
+    s.add_row("our comments posted", str(summary["posted"]))
+    s.add_row("precision (lower bound)", f"{summary['precision']:.0%}")
+    s.add_row("total cost", f"${summary['cost']:.2f}")
+    console.print(Panel(s, title=summary["repo"], border_style="dim", title_align="left"))
+
+    for r in results:
+        for d in r.details:
+            mark = "[green]match[/green]" if d["matched"] else "[dim]miss [/dim]"
+            console.print(f"{mark} [dim]{r.pr}[/dim] {d['human'][:90]}")
+            if not d["matched"]:
+                console.print(f"        [dim]{d['why'][:100]}[/dim]")
 
 
 @app.command()
