@@ -161,3 +161,38 @@ def test_verifier_shares_the_finder_cache_prefix() -> None:
     trailing = captured[0]["messages"][0]["content"][-1]["text"]
     assert "REFUTE" in trailing
     assert "cache_control" not in trailing
+
+
+def test_fanout_survives_a_failing_first_pass() -> None:
+    """A truncated structured output on one lens must not lose the whole review."""
+    import asyncio
+
+    from cr.llm.client import Call, ClientPool, LLMClient
+    from cr.models import FindingList, Usage
+
+    class Boom:
+        class messages:
+            @staticmethod
+            def stream(**_kw):
+                raise RuntimeError("truncated JSON")
+
+    client = LLMClient(pool=ClientPool(Boom()))
+
+    async def fake_parse(**kw):
+        return Call(parsed=FindingList(), usage=Usage(), model="m", label=kw.get("label", ""))
+
+    client.parse = fake_parse  # type: ignore[method-assign]
+
+    b = _builder()
+    out = asyncio.run(
+        client.fanout(
+            model="m",
+            schema=FindingList,
+            system=b.system(),
+            message_builder=b.messages,
+            roles=[("a", "x"), ("b", "y")],
+            warm_timeout_s=1.0,
+        )
+    )
+    # The surviving lens still returns.
+    assert [c.label for c in out] == ["b"]

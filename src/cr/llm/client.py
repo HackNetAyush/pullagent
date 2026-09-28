@@ -191,7 +191,7 @@ class LLMClient:
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         effort: str = "high",
-        max_tokens: int = 16000,
+        max_tokens: int = 32000,
         label: str = "",
     ) -> Call:
         """One structured-output call. Schema is enforced API-side, so no
@@ -225,7 +225,7 @@ class LLMClient:
         message_builder: Any,
         roles: list[tuple[str, str]],
         effort: str = "high",
-        max_tokens: int = 16000,
+        max_tokens: int = 32000,
         warm_timeout_s: float = 90.0,
     ) -> list[Call]:
         """Run N passes over one shared cached prefix, staggering the first.
@@ -293,7 +293,14 @@ class LLMClient:
             return_exceptions=True,
         )
 
-        results: list[Call] = [await task]
+        results: list[Call] = []
+        try:
+            results.append(await task)
+        except Exception as e:  # noqa: BLE001
+            # Usually a truncated structured output: thinking and the answer share
+            # max_tokens, so a large diff can cut the JSON mid-string. Losing one
+            # lens is survivable; losing the run is not.
+            log.error("first fanout pass failed: %s", e)
         for r in rest:
             if isinstance(r, BaseException):
                 log.error("fanout pass failed: %s", r)

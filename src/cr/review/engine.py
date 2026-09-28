@@ -31,6 +31,8 @@ async def find(
     rest read it. See PIPELINE.md §2.2.
     """
     roles = [(lens, prompts.finder_instruction(lens)) for lens in tier.finders]
+    # xhigh spends far more on thinking, and thinking draws from max_tokens.
+    budget = 64000 if tier.effort in ("xhigh", "max") else 32000
     calls = await client.fanout(
         model=tier.model,
         schema=FindingList,
@@ -38,6 +40,7 @@ async def find(
         message_builder=builder.messages,
         roles=roles,
         effort=tier.effort,
+        max_tokens=budget,
     )
 
     out: list[Finding] = []
@@ -130,7 +133,7 @@ async def verify(
                         + prompts.verifier_instruction(lens, payload)
                     ),
                     effort=tier.effort,
-                    max_tokens=4000,
+                    max_tokens=12000,
                     label=f"verify:{lens}",
                 )
                 for lens in tier.verifier_lenses
