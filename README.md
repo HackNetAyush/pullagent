@@ -140,6 +140,25 @@ match the canonical model ID. Defaults: Sonnet 5 for finders, Opus 5 for T3
 verification. **No Haiku tier** — not every deployment has one, and Sonnet at
 `effort=low` is close enough in cost without adding a required model.
 
+## Dashboard
+
+```bash
+cd dashboard && npm install && npm run build && cd ..
+uv run cr serve            # http://127.0.0.1:8000
+```
+
+For UI development, run the API and Vite separately — Vite proxies `/api`:
+
+```bash
+uv run cr serve            # terminal 1
+cd dashboard && npm run dev   # terminal 2, http://localhost:5173
+```
+
+Shows in-flight reviews with their current stage, spend over time, verifier kill
+rate, cache-hit health, findings by severity, and the suppression memory. It
+reads the same SQLite store the CLI writes to, so a review started from a
+terminal or from CI appears live with no extra wiring.
+
 ## Learning and measurement
 
 ```bash

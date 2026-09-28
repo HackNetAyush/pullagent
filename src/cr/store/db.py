@@ -225,3 +225,104 @@ def stats(repo: str | None = None, url: str | None = None) -> dict:
             "suppressions": n_sup or 0,
             "suppression_hits": sup_hits or 0,
         }
+
+
+# --- live progress -----------------------------------------------------------
+
+STAGES = [
+    "triage",
+    "context",
+    "find",
+    "prefilter",
+    "verify",
+    "gate",
+    "post",
+    "done",
+]
+
+
+def start_run(
+    repo: str,
+    *,
+    tier: str,
+    model: str,
+    pr_number: int | None = None,
+    head_sha: str = "",
+    url: str | None = None,
+) -> int | None:
+    """Create the row a dashboard watches while the review is in flight."""
+    try:
+        with session(url) as s:
+            run = Run(
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                tier=tier,
+                model=model,
+                status="running",
+                stage="triage",
+                stage_index=0,
+            )
+            s.add(run)
+            s.flush()
+            return run.id
+    except Exception as e:  # noqa: BLE001
+        log.debug("start_run failed: %s", e)
+        return None
+
+
+def set_stage(run_id: int | None, stage: str, url: str | None = None) -> None:
+    if run_id is None:
+        return
+    try:
+        with session(url) as s:
+            run = s.get(Run, run_id)
+            if run:
+                run.stage = stage
+                run.stage_index = STAGES.index(stage) if stage in STAGES else run.stage_index
+    except Exception as e:  # noqa: BLE001
+        log.debug("set_stage failed: %s", e)
+
+
+def finish_run(
+    run_id: int | None,
+    result: ReviewResult,
+    *,
+    cost: float,
+    error: str = "",
+    url: str | None = None,
+) -> None:
+    if run_id is None:
+        return
+    try:
+        with session(url) as s:
+            run = s.get(Run, run_id)
+            if not run:
+                return
+            u = result.usage
+            run.status = "failed" if error else "done"
+            run.stage = "done"
+            run.stage_index = len(STAGES) - 1
+            run.error = error[:2000]
+            run.finished_at = _utcnow()
+            run.posted = len(result.posted)
+            run.suppressed = len(result.suppressed)
+            run.killed_by_verifier = len(result.suppressed)
+            run.input_tokens = u.input_tokens
+            run.output_tokens = u.output_tokens
+            run.cache_read_tokens = u.cache_read_input_tokens
+            run.cache_write_tokens = u.cache_creation_input_tokens
+            run.cost_usd = cost
+            run.elapsed_s = result.elapsed_s
+            for vf, posted in [(v, 1) for v in result.posted] + [
+                (v, 0) for v in result.suppressed
+            ]:
+                s.add(_row(run.id, run.repo, vf, posted))
+    except Exception as e:  # noqa: BLE001
+        log.warning("finish_run failed: %s", e)
+
+
+def _utcnow():
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)

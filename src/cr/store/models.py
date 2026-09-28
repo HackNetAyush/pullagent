@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now() -> datetime:
@@ -42,6 +42,12 @@ class Run(Base):
     head_sha: Mapped[str] = mapped_column(String(64), default="")
     tier: Mapped[str] = mapped_column(String(8), default="")
     model: Mapped[str] = mapped_column(String(64), default="")
+
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    stage: Mapped[str] = mapped_column(String(32), default="queued")
+    stage_index: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     posted: Mapped[int] = mapped_column(Integer, default=0)
     suppressed: Mapped[int] = mapped_column(Integer, default=0)

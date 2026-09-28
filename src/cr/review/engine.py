@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 
 from cr.config import T3_VERIFIER_MODEL, Settings, TierConfig
 from cr.config import settings as default_settings
@@ -187,21 +188,27 @@ async def review(
     client: LLMClient | None = None,
     cfg: Settings | None = None,
     remember: bool = True,
+    on_stage: Callable[[str], None] | None = None,
 ) -> ReviewResult:
     s = cfg or default_settings
     llm = client or LLMClient(pool=build_pool(s))
     started = time.monotonic()
 
     builder = PrefixBuilder(preamble=prompts.PREAMBLE, repo=repo, pr=pr)
+    emit = on_stage or (lambda _s: None)
 
+    emit("find")
     raw = await find(llm, builder, tier)
     log.info("found %d raw findings", len(raw))
 
+    emit("prefilter")
     candidates, dropped = prefilter(raw, s)
     log.info("prefilter kept %d, dropped %d", len(candidates), len(dropped))
 
+    emit("verify")
     verified = await verify(llm, builder, tier, candidates) if candidates else []
 
+    emit("gate")
     fps = store.suppressed_fingerprints(repo.slug) if remember else set()
     posted, suppressed = gate(verified, tier, fps)
     if fps:

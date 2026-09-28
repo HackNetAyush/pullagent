@@ -275,7 +275,26 @@ def review_pr(
             suppressed_rules=lint.rules,
         )
 
-        result = asyncio.run(run_review(repo=RepoContext(slug=ref.slug), pr=pr_ctx, tier=cfg))
+        run_id = store.start_run(
+            ref.slug,
+            tier=cfg.name,
+            model=cfg.model,
+            pr_number=ref.number,
+            head_sha=meta["head"]["sha"],
+        )
+        try:
+            result = asyncio.run(
+                run_review(
+                    repo=RepoContext(slug=ref.slug),
+                    pr=pr_ctx,
+                    tier=cfg,
+                    on_stage=lambda st: store.set_stage(run_id, st),
+                )
+            )
+        except Exception as exc:
+            store.finish_run(run_id, ReviewResult(tier=cfg.name), cost=0.0, error=str(exc))
+            raise
+        _cost = result.usage.cost_usd(*RATES.get(cfg.model, (3.0, 15.0)))
         _render(result, cfg.model)
 
         already = set() if dry_run else gh.posted_fingerprints()
@@ -290,6 +309,7 @@ def review_pr(
         )
 
         if dry_run:
+            store.finish_run(run_id, result, cost=_cost)
             console.print("\n[yellow]--dry-run: not posting.[/yellow]\n")
             console.print(body)
             for c in comments:
@@ -298,14 +318,7 @@ def review_pr(
 
         gh.submit_review(body, comments, meta["head"]["sha"])
         console.print(f"[green]Posted {len(comments)} inline comment(s).[/green]")
-        store.record_run(
-            ref.slug,
-            result,
-            model=cfg.model,
-            cost=result.usage.cost_usd(*RATES.get(cfg.model, (3.0, 15.0))),
-            pr_number=ref.number,
-            head_sha=meta["head"]["sha"],
-        )
+        store.finish_run(run_id, result, cost=_cost)
 
 
 @app.command()
@@ -518,6 +531,18 @@ def eval_cmd(
         for s in scores[:1]:
             for extra in s.extra:
                 console.print(f"[dim]unlabelled finding: {extra}[/dim]")
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 8000,
+) -> None:
+    """Run the dashboard API (and the built UI, if dashboard/dist exists)."""
+    import uvicorn
+
+    console.print(f"[green]http://{host}:{port}[/green]  [dim]API docs at /api/docs[/dim]")
+    uvicorn.run("cr.server:app", host=host, port=port, log_level="warning")
 
 
 @app.command()
