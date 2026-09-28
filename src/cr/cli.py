@@ -142,13 +142,14 @@ def _require_credentials() -> None:
 def review(
     repo: Annotated[Path, typer.Argument(help="Repo to review")] = Path("."),
     base: Annotated[str | None, typer.Option("--base", "-b", help="Base ref, e.g. main")] = None,
+    staged: Annotated[bool, typer.Option("--staged", help="Only what is git-added")] = False,
     tier: Annotated[str | None, typer.Option("--tier", "-t", help="Force T1/T2/T3")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Review uncommitted changes, or `base`..HEAD."""
+    """Review staged changes, uncommitted changes, or `base`..HEAD."""
     _setup_logging(verbose)
 
-    diff = collect(str(repo), base)
+    diff = collect(str(repo), base, staged=staged)
     if not diff.files:
         console.print("[yellow]No changes to review.[/yellow]")
         raise typer.Exit(0)
@@ -172,7 +173,11 @@ def review(
 
     pr = PRContext(
         title=f"Local changes in {repo.resolve().name}",
-        description="Uncommitted working-tree changes." if not base else f"Changes since {base}.",
+        description=(
+            f"Changes since {base}."
+            if base
+            else "Staged changes." if staged else "Uncommitted working-tree changes."
+        ),
         diff=DiffSet(files=filtered, base=diff.base, head=diff.head).render(),
     )
     _require_credentials()

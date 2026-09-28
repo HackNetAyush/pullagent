@@ -158,6 +158,7 @@ def collect(
     *,
     context_lines: int = 3,
     include_untracked: bool = True,
+    staged: bool = False,
 ) -> DiffSet:
     """Diff the working tree (or `base`..HEAD) into a DiffSet.
 
@@ -168,6 +169,12 @@ def collect(
     if base:
         args = ["git", "diff", f"--unified={context_lines}", f"{base}...HEAD"]
         head = _run(["git", "rev-parse", "HEAD"], repo).strip()
+    elif staged:
+        # Only the index. `git add`-ed new files already appear here, so the
+        # untracked sweep would double-count them.
+        args = ["git", "diff", "--cached", f"--unified={context_lines}"]
+        head = "STAGED"
+        include_untracked = False
     else:
         args = ["git", "diff", f"--unified={context_lines}", "HEAD"]
         head = "WORKTREE"
