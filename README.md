@@ -54,6 +54,24 @@ jobs:
 
 **3.** Open a PR. That's it — no server, no database, no GitHub App registration.
 
+### Warm a repo first (enterprise flow)
+
+```bash
+uv run cr index acme/api        # clone + index. One time per repo.
+uv run cr cache-info            # what is cached on disk
+```
+
+Cold: clone + index the whole repo. Warm: every later review fetches only the
+delta and reuses the index, so it starts in seconds *and* sees cross-file context
+— callers of changed symbols, and files that historically change alongside them.
+
+Reviews work without this; they just see the diff alone. `cr index` is what turns
+a diff reader into something that can say "this change breaks three callers".
+
+**The index is ours, on disk — not model memory.** The model is stateless and
+remembers nothing between calls. The index exists so we can *select* the right
+20K tokens of context out of a large repo quickly.
+
 ### Try it locally first
 
 ```bash
@@ -135,6 +153,9 @@ verification. **No Haiku tier** — not every deployment has one, and Sonnet at
 ```
 src/cr/
   models.py        finding schema — the thesis as types
+  repo.py          warm bare mirror + throwaway worktree per review
+  graph.py         tree-sitter symbol index, persisted per commit
+  warm.py          clone + index orchestration, base-graph + delta
   config.py        tier routing table
   triage.py        T0/T1/T2/T3, no model calls
   diff.py          unidiff parsing + commentable-line map
