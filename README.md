@@ -3,8 +3,9 @@
 An AI code reviewer that optimises for **precision, not recall**. Three comments
 that are right beat twenty that are mostly noise.
 
-Design docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (what and why) and
-[`docs/PIPELINE.md`](docs/PIPELINE.md) (execution, caching, concurrency).
+Design docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (what and why),
+[`docs/PIPELINE.md`](docs/PIPELINE.md) (execution, caching, concurrency), and
+[`docs/BACKLOG.md`](docs/BACKLOG.md) (what to build, with the library for each).
 
 ---
 
