@@ -11,8 +11,13 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+# Untracked files are invisible to `git diff`, but a newly added file is exactly
+# what a reviewer most needs to see. Synthesise an all-additions patch for each.
+UNTRACKED_MAX_BYTES = 200_000
 
 
 @dataclass
@@ -73,10 +78,42 @@ def _run(args: list[str], cwd: str) -> str:
     return proc.stdout
 
 
-def collect(repo: str = ".", base: str | None = None, *, context_lines: int = 3) -> DiffSet:
+def untracked_files(repo: str) -> list[FileDiff]:
+    """Collect untracked, non-ignored files as all-addition patches."""
+    out: list[FileDiff] = []
+    listing = _run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    for raw in listing.splitlines():
+        rel = raw.strip()
+        if not rel:
+            continue
+        path = Path(repo) / rel
+        try:
+            if path.stat().st_size > UNTRACKED_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # binary, unreadable, or vanished
+        lines = text.splitlines()
+        if not lines:
+            continue
+        header = "@@ -0,0 +1," + str(len(lines)) + " @@\n"
+        body = "".join("+" + ln + "\n" for ln in lines)
+        out.append(FileDiff(path=rel, patch=header + body, added=len(lines), is_new=True))
+    return out
+
+
+def collect(
+    repo: str = ".",
+    base: str | None = None,
+    *,
+    context_lines: int = 3,
+    include_untracked: bool = True,
+) -> DiffSet:
     """Diff the working tree (or `base`..HEAD) into a DiffSet.
 
     With no base, reviews uncommitted changes — the fast local dev loop.
+    Untracked files are included by default: `git diff` alone would miss every
+    newly added file, which is precisely what a reviewer needs to see.
     """
     if base:
         args = ["git", "diff", f"--unified={context_lines}", f"{base}...HEAD"]
@@ -113,5 +150,9 @@ def collect(repo: str = ".", base: str | None = None, *, context_lines: int = 3)
     if current:
         current.patch = "".join(buf)
         files.append(current)
+
+    if include_untracked and not base:
+        known = {f.path for f in files}
+        files.extend(f for f in untracked_files(repo) if f.path not in known)
 
     return DiffSet(files=files, base=base or "HEAD", head=head)

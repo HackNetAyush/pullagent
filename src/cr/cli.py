@@ -6,7 +6,9 @@ Iterate on prompts here, never by pushing to GitHub.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -22,6 +24,19 @@ from cr.llm.prefix import PRContext, RepoContext
 from cr.models import ReviewResult, Severity
 from cr.review.engine import review as run_review
 from cr.triage import triage
+
+
+def _force_utf8() -> None:
+    """Windows consoles default to cp1252, which cannot encode the arrows and box
+    characters Rich emits. Must run before the Console is constructed."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower()
+        if enc.replace("-", "") != "utf8" and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(ValueError, OSError):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8()
 
 app = typer.Typer(add_completion=False, help="High-precision AI code review")
 console = Console()
