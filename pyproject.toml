@@ -9,6 +9,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     "typer>=0.15",
     "rich>=13.9",
+    "githubkit>=0.16.1",
+    "unidiff>=1.0.1",
 ]
 
 [project.optional-dependencies]

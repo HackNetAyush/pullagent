@@ -3,48 +3,104 @@
 An AI code reviewer that optimises for **precision, not recall**. Three comments
 that are right beat twenty that are mostly noise.
 
-Design docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (what and why),
-[`docs/PIPELINE.md`](docs/PIPELINE.md) (execution, caching, concurrency), and
-[`docs/BACKLOG.md`](docs/BACKLOG.md) (what to build, with the library for each).
+---
+
+## Ship it on your repo in 5 minutes
+
+**1.** Add your Anthropic key as a repo secret named `ANTHROPIC_API_KEY`
+(Settings → Secrets and variables → Actions → New repository secret).
+
+**2.** Drop this in `.github/workflows/review.yml`:
+
+```yaml
+name: CR review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: cr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: YOUR_ORG/CR@main
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**3.** Open a PR. That's it — no server, no database, no GitHub App registration.
+
+### Try it locally first
+
+```bash
+uv sync
+export CR_ANTHROPIC_API_KEY=sk-ant-...
+export GITHUB_TOKEN=ghp_...
+
+uv run cr review                              # uncommitted changes
+uv run cr review --base main                  # main..HEAD
+uv run cr review-pr --pr owner/repo#42 --dry-run   # a real PR, printed not posted
+```
+
+Always `--dry-run` the first time.
 
 ---
 
-## Quick start
+## Why a GitHub Action, not a GitHub App
 
-```bash
-uv sync --extra dev
-cp .env.example .env          # add your Anthropic key
-uv run cr review              # review uncommitted changes
-uv run cr review --base main  # review main..HEAD
-uv run cr tiers               # show the routing table
+The Action skips the webhook server, the queue, Postgres, the App registration,
+*and* the sandbox — Actions already gives you an ephemeral VM per run. The same
+`cr` core powers both, so the App (`docs/BACKLOG.md` CR-01…CR-07) is a delivery
+change, not a rewrite.
+
+The trade-off is real and worth knowing: **fork PRs are not reviewed.** The
+workflow's `if:` guard skips them, because `pull_request` gives forks a read-only
+token and no secrets. That is the correct behaviour until the sandbox lands
+(CR-08…CR-13) — reviewing untrusted code without isolation is how you leak an API
+key.
+
+---
+
+## How it works
+
 ```
-
-## What it does today (Phase 0–2)
-
-```
-git diff → triage → find (N specialists) → verify (adversarial) → gate → render
+PR diff → triage → lint (subtracts) → find (N lenses) → verify (refute) → gate → post
 ```
 
 - **Triage** routes on hunk/file counts and path sensitivity. Lockfiles, generated
-  files, and vendored code exit at T0 having spent **$0.00** and made zero model calls.
-- **Find** runs N specialist lenses concurrently over one shared, cached prompt prefix.
-- **Verify** tries to *refute* each finding in a fresh context, defaulting to refuted
-  under uncertainty. Majority-refute kills it; so does a tie.
-- **Gate** ranks survivors by confidence × severity and enforces a hard comment budget.
+  files and vendored code exit at T0 having spent **$0.00** and made zero model calls.
+- **Lint** runs `ruff`/`semgrep` when available and builds a *suppression list* —
+  the model is forbidden from commenting on anything a linter already caught. This
+  deletes the nitpick class at zero token cost.
+- **Find** runs N specialist lenses concurrently over one shared, cached prompt
+  prefix. Prompted for coverage, never for filtering.
+- **Verify** tries to *refute* each finding in a fresh context, defaulting to
+  refuted under uncertainty. Majority-refute kills it; so does a tie.
+- **Gate** ranks survivors by confidence × severity and enforces a hard comment
+  budget. The budget is a feature.
+- **Post** submits one review with inline threads — not N separate comments, which
+  generate N notifications and read as spam. Each comment carries a fingerprint
+  marker, so re-running on a new push never reposts the same finding.
 
-## Status
+Cost: **$0.00** (T0) · **~$0.02** (T1) · **~$0.23** (T2) · **~$0.50** (T3).
 
-| Phase | | |
-|---|---|---|
-| 0 | CLI spike | ✅ |
-| 1 | Eval harness | 🔜 **next** |
-| 2 | Precision gate | ✅ schema, verifier, budget |
-| 3 | Context engine (compression, tree-sitter graph, lint subtraction) | ⬜ |
-| 4 | GitHub App (webhook → queue → worker → inline comments) | ⬜ |
-| 5 | Sandbox + scale | ⬜ |
-| 6 | Learning loop | ⬜ |
-| 7 | Cost tuning | ⬜ |
-| 8 | VS Code extension | ⬜ |
+## Design docs
+
+| | |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | What we're building and why |
+| [`docs/PIPELINE.md`](docs/PIPELINE.md) | Execution, caching, concurrency at scale |
+| [`docs/BACKLOG.md`](docs/BACKLOG.md) | 57 items, each with the library that solves it |
 
 ## Layout
 
@@ -52,30 +108,23 @@ git diff → triage → find (N specialists) → verify (adversarial) → gate �
 src/cr/
   models.py        finding schema — the thesis as types
   config.py        tier routing table
-  triage.py        stage 1 — T0/T1/T2/T3, no model calls
-  diff.py          local git diff → DiffSet
-  llm/
-    prefix.py      ★ cached prompt-prefix builder (two breakpoints)
-    client.py      ★ Anthropic wrapper + staggered fan-out
-  review/
-    prompts.py     ★ finder and verifier prompts — this file is the product
-    engine.py      stages 6–8
-  cli.py           `cr review`
-vendor/pr_agent/   MIT algorithms lifted from PR-Agent (see its README)
-evals/             precision/recall/cost harness (phase 1)
+  triage.py        T0/T1/T2/T3, no model calls
+  diff.py          unidiff parsing + commentable-line map
+  lint.py          deterministic layer (D1) — subtracts from the model
+  github.py        PR fetch, inline review posting, dedup
+  llm/prefix.py    ★ cached prompt-prefix builder (two breakpoints)
+  llm/client.py    ★ Anthropic wrapper + staggered fan-out
+  review/prompts.py ★ finder and verifier prompts — this file is the product
+  review/engine.py  find → prefilter → verify → gate
+  cli.py           `cr review`, `cr review-pr`
+vendor/pr_agent/   MIT algorithms lifted from PR-Agent
 ```
-
-The three ★ files are where the leverage is. Read `prefix.py` and `client.py`
-together — they implement one idea, and getting it wrong costs 82% of the input
-budget with no error message.
 
 ## Two invariants you must not break
 
-**1. Cache-prefix byte stability.** A timestamp, UUID, or unsorted dict anywhere
-in a cached block silently sets `cache_read_input_tokens` to zero. `prefix.py`
-raises `CacheInvalidatorError` at build time to stop this reaching production, and
-`tests/test_prefix.py` guards the layout. If `cr review` prints a low cache-hit
-ratio, something got past both.
+**1. Cache-prefix byte stability.** A timestamp, UUID or unsorted dict anywhere in
+a cached block silently sets `cache_read_input_tokens` to zero. `prefix.py` raises
+`CacheInvalidatorError` at build time; `tests/test_prefix.py` guards the layout.
 
 **2. Staggered fan-out.** A cache entry is only readable once the first response
 *begins streaming*. Firing all N specialists at once on a cold prefix means all N
@@ -85,12 +134,9 @@ releases the rest. Do not "optimise" that await away.
 ## Development
 
 ```bash
-uv run pytest          # 25 tests, no API key needed
+uv run pytest                      # 33 tests, no API key needed
 uv run ruff check src/ tests/
-uv run mypy src/
 ```
-
-Iterate on prompts through the CLI against a local diff. Never by pushing to GitHub.
 
 ## Licence and attribution
 

@@ -1,0 +1,47 @@
+name: "CR — AI code review"
+description: "High-precision AI code review on pull requests. Few comments, mostly right."
+author: "CR"
+
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  anthropic-api-key:
+    description: "Anthropic API key."
+    required: true
+  github-token:
+    description: "Token used to read the PR and post the review."
+    required: false
+    default: ${{ github.token }}
+  tier:
+    description: "Force a tier (T1/T2/T3). Leave empty to auto-route."
+    required: false
+    default: ""
+  dry-run:
+    description: "Print the review instead of posting it."
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+
+    - name: Install CR
+      shell: bash
+      run: uv tool install --python 3.12 "${{ github.action_path }}"
+
+    - name: Review
+      shell: bash
+      env:
+        CR_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        args=()
+        [ -n "${{ inputs.tier }}" ] && args+=(--tier "${{ inputs.tier }}")
+        [ "${{ inputs.dry-run }}" = "true" ] && args+=(--dry-run)
+        cr review-pr "${args[@]}"

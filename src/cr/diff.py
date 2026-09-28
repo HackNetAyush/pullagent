@@ -1,19 +1,17 @@
-"""Local git diff acquisition and light parsing.
+"""Diff acquisition and parsing.
 
-Phase 0 keeps this minimal. Phase 3 replaces the hunk handling with the vendored
-`vendor/pr_agent/git_patch_processing.py`, which already handles the edge cases
-that will otherwise bite you: `\\ No newline at end of file`, CRLF, and the
-Unicode line separators (\\x1c \\x1d \\x1e \\x85 U+2028 U+2029).
+Parsing is delegated to `unidiff`, which already handles renames, mode changes,
+binary markers and `\\ No newline at end of file`. Do not hand-roll this.
 """
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+from unidiff import PatchSet
+from unidiff.errors import UnidiffParseError
 
 # Untracked files are invisible to `git diff`, but a newly added file is exactly
 # what a reviewer most needs to see. Synthesise an all-additions patch for each.
@@ -28,11 +26,17 @@ class FileDiff:
     removed: int = 0
     is_new: bool = False
     is_deleted: bool = False
+    # New-side line numbers GitHub will accept an inline comment on. Only lines
+    # present in the diff are commentable; anything else is a 422 from the API.
+    commentable: set[int] = field(default_factory=set)
+    hunks: int = 0
 
-    @property
-    def hunks(self) -> int:
-        n = sum(1 for line in self.patch.splitlines() if HUNK_HEADER.match(line))
-        return n or (1 if self.patch.strip() else 0)
+    def __post_init__(self) -> None:
+        # Derive the hunk count when a caller builds a FileDiff directly (tests,
+        # synthesised untracked patches) rather than through `parse`.
+        if self.hunks == 0 and self.patch.strip():
+            counted = sum(1 for ln in self.patch.splitlines() if ln.startswith("@@"))
+            self.hunks = counted or 1
 
 
 @dataclass
@@ -49,11 +53,16 @@ class DiffSet:
     def total_files(self) -> int:
         return len(self.files)
 
+    def commentable_map(self) -> dict[str, set[int]]:
+        return {f.path: f.commentable for f in self.files if f.commentable}
+
     def render(self, max_chars: int = 120_000) -> str:
+        """Additions matter more than deletions; deleted files collapse to a list.
+
+        Same prioritisation as pr-agent's compression strategy.
+        """
         out: list[str] = []
         used = 0
-        # Additions matter more than deletions; deleted files collapse to a list.
-        # (Same prioritisation as pr-agent's compression strategy.)
         deleted = [f.path for f in self.files if f.is_deleted]
         for f in self.files:
             if f.is_deleted:
@@ -67,6 +76,38 @@ class DiffSet:
         if deleted:
             out.append("\nDeleted files:\n" + "\n".join(f"- {p}" for p in sorted(deleted)))
         return "".join(out)
+
+
+def parse(unified: str) -> list[FileDiff]:
+    """Parse a unified diff into FileDiffs, recording commentable line numbers."""
+    try:
+        patch_set = PatchSet(unified)
+    except (UnidiffParseError, UnicodeDecodeError):
+        return []
+
+    files: list[FileDiff] = []
+    for pf in patch_set:
+        path = pf.path  # unidiff strips the a/ b/ prefixes and handles renames
+        commentable: set[int] = set()
+        for hunk in pf:
+            for line in hunk:
+                # Added and context lines both carry a new-side number and both
+                # are valid inline-comment anchors. Removed lines are not.
+                if line.target_line_no is not None and not line.is_removed:
+                    commentable.add(line.target_line_no)
+        files.append(
+            FileDiff(
+                path=path,
+                patch=str(pf),
+                added=pf.added,
+                removed=pf.removed,
+                is_new=pf.is_added_file,
+                is_deleted=pf.is_removed_file,
+                commentable=commentable,
+                hunks=len(pf) or (1 if str(pf).strip() else 0),
+            )
+        )
+    return files
 
 
 def _run(args: list[str], cwd: str) -> str:
@@ -98,7 +139,16 @@ def untracked_files(repo: str) -> list[FileDiff]:
             continue
         header = "@@ -0,0 +1," + str(len(lines)) + " @@\n"
         body = "".join("+" + ln + "\n" for ln in lines)
-        out.append(FileDiff(path=rel, patch=header + body, added=len(lines), is_new=True))
+        out.append(
+            FileDiff(
+                path=rel,
+                patch=header + body,
+                added=len(lines),
+                is_new=True,
+                commentable=set(range(1, len(lines) + 1)),
+                hunks=1,
+            )
+        )
     return out
 
 
@@ -122,34 +172,7 @@ def collect(
         args = ["git", "diff", f"--unified={context_lines}", "HEAD"]
         head = "WORKTREE"
 
-    raw = _run(args, repo)
-    files: list[FileDiff] = []
-    current: FileDiff | None = None
-    buf: list[str] = []
-
-    for line in raw.splitlines(keepends=True):
-        if line.startswith("diff --git "):
-            if current:
-                current.patch = "".join(buf)
-                files.append(current)
-            m = re.match(r"diff --git a/(.+?) b/(.+)", line)
-            path = m.group(2) if m else "unknown"
-            current = FileDiff(path=path, patch="")
-            buf = []
-        elif current is not None:
-            if line.startswith("new file mode"):
-                current.is_new = True
-            elif line.startswith("deleted file mode"):
-                current.is_deleted = True
-            elif line.startswith("+") and not line.startswith("+++"):
-                current.added += 1
-            elif line.startswith("-") and not line.startswith("---"):
-                current.removed += 1
-            buf.append(line)
-
-    if current:
-        current.patch = "".join(buf)
-        files.append(current)
+    files = parse(_run(args, repo))
 
     if include_untracked and not base:
         known = {f.path for f in files}
