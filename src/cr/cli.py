@@ -19,16 +19,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from cr import evals as ev
 from cr.config import TIERS, settings
 from cr.diff import DiffSet, collect, parse
 from cr.doctor import run as doctor_run
-from cr.github import GitHubPR, PRRef, build_review, pr_from_env
+from cr.github import MARKER, GitHubPR, PRRef, build_review, pr_from_env
 from cr.lint import analyse
 from cr.llm.client import RATES
 from cr.llm.prefix import PRContext, RepoContext
 from cr.models import ReviewResult, Severity
 from cr.repo import RepoCache, default_cache_dir
 from cr.review.engine import review as run_review
+from cr.store import db as store
 from cr.triage import triage
 from cr.warm import context_for_pr, index_repo
 
@@ -296,6 +298,14 @@ def review_pr(
 
         gh.submit_review(body, comments, meta["head"]["sha"])
         console.print(f"[green]Posted {len(comments)} inline comment(s).[/green]")
+        store.record_run(
+            ref.slug,
+            result,
+            model=cfg.model,
+            cost=result.usage.cost_usd(*RATES.get(cfg.model, (3.0, 15.0))),
+            pr_number=ref.number,
+            head_sha=meta["head"]["sha"],
+        )
 
 
 @app.command()
@@ -390,6 +400,124 @@ def cache_info() -> None:
         return
     console.print(t)
     console.print(f"[dim]{cache.root}[/dim]")
+
+
+@app.command()
+def learn(
+    pr: Annotated[str, typer.Option("--pr", help="owner/repo#123")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Record human rejections so those findings never come back.
+
+    Reads resolved review threads and thumbs-down reactions; each rejected
+    fingerprint is stored per repo and filtered out of future reviews.
+    """
+    _setup_logging(verbose)
+    ref = _parse_pr_arg(pr)
+    if ref is None:
+        console.print("[red]Use --pr owner/repo#123[/red]")
+        raise typer.Exit(2)
+    token = settings.github_token
+    if not token:
+        console.print("[red]GITHUB_TOKEN is not set.[/red]")
+        raise typer.Exit(2)
+
+    with GitHubPR(ref, token) as gh:
+        resolved = gh.resolved_threads()
+        down = gh.thumbs_down()
+        bodies = {}
+        for c in gh.review_comments():
+            for fp in MARKER.findall(c.get("body") or ""):
+                bodies[fp] = ((c.get("body") or "")[:400], c.get("path") or "")
+
+    added = 0
+    for fps, reason in ((resolved, "resolved"), (down, "thumbs_down")):
+        for fp in fps:
+            body, path = bodies.get(fp, ("", ""))
+            if store.suppress(
+                ref.slug, fp, reason=reason, claim=body, file=path, pr_number=ref.number
+            ):
+                added += 1
+
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_row("resolved threads", str(len(resolved)))
+    t.add_row("thumbs-down", str(len(down)))
+    t.add_row("newly suppressed", str(added))
+    console.print(Panel(t, title="learn", border_style="dim", title_align="left"))
+    if added:
+        console.print("[green]These will not be posted again on this repo.[/green]")
+
+
+@app.command()
+def stats(
+    repo: Annotated[str | None, typer.Option("--repo", help="owner/repo")] = None,
+) -> None:
+    """Run history and suppression-memory effectiveness."""
+    d = store.stats(repo)
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_row("runs", f"{d['runs']:,}")
+    t.add_row("comments posted", f"{d['posted']:,}")
+    t.add_row("killed by verifier", f"{d['killed']:,}")
+    t.add_row("total cost", f"${d['cost_usd']:.2f}")
+    t.add_row("suppressions stored", f"{d['suppressions']:,}")
+    t.add_row("suppressions fired", f"{d['suppression_hits']:,}")
+    console.print(Panel(t, title="stats", border_style="dim", title_align="left"))
+
+
+@app.command("eval")
+def eval_cmd(
+    fixture: Annotated[
+        str | None, typer.Option("--fixture", "-f", help="Fixture name; omit for all")
+    ] = None,
+    runs: Annotated[int, typer.Option("--runs", "-n", help="Repeats, to show variance")] = 1,
+    tier: Annotated[str, typer.Option("--tier", "-t")] = "T2",
+    no_graph: Annotated[bool, typer.Option("--no-graph", help="Measure without context")] = False,
+    directory: Annotated[Path, typer.Option("--dir")] = Path("evals/fixtures"),
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Score the reviewer against PRs whose bugs are known.
+
+    Recall is trustworthy; precision is a lower bound, since an unmatched finding
+    may be a real defect nobody labelled.
+    """
+    _setup_logging(verbose)
+    _require_credentials()
+
+    fixtures = [f for f in ev.load_all(directory) if not fixture or fixture in f.name]
+    if not fixtures:
+        console.print(f"[yellow]No fixtures in {directory}[/yellow]")
+        raise typer.Exit(1)
+
+    for fx in fixtures:
+        console.print(f"\n[bold]{fx.name}[/bold]  [dim]{fx.pr}[/dim]")
+        scores = ev.evaluate(fx, settings, tier_name=tier, runs=runs, use_graph=not no_graph)
+        d = ev.summarise(fx, scores)
+
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        spread = (
+            f"{d['recall_mean']:.0%}"
+            if runs == 1
+            else f"{d['recall_mean']:.0%}  (min {d['recall_min']:.0%}, max {d['recall_max']:.0%})"
+        )
+        t.add_row("known bugs", str(d["expected"]))
+        t.add_row("recall", spread)
+        t.add_row("precision (lower bound)", f"{d['precision_mean']:.0%}")
+        t.add_row("comments posted", f"{d['posted_mean']:.1f}")
+        t.add_row("cost / run", f"${d['cost_mean']:.4f}")
+        t.add_row("cache hit", f"{d['cache_ratio_mean']:.0%}")
+        console.print(Panel(t, title=f"{runs} run(s)", border_style="dim", title_align="left"))
+
+        if runs > 1 and d["found_every_run"] != d["found_at_least_once"]:
+            flaky = set(d["found_at_least_once"]) - set(d["found_every_run"])
+            console.print(f"[yellow]flaky:[/yellow] {', '.join(sorted(flaky))}")
+        if d["never_found"]:
+            console.print(f"[red]missed:[/red] {', '.join(d['never_found'])}")
+        else:
+            console.print("[green]all known bugs found[/green]")
+
+        for s in scores[:1]:
+            for extra in s.extra:
+                console.print(f"[dim]unlabelled finding: {extra}[/dim]")
 
 
 @app.command()

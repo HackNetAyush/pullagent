@@ -136,6 +136,79 @@ class GitHubPR:
             page += 1
         return seen
 
+
+    def review_comments(self) -> list[dict]:
+        """All inline review comments on the PR, paginated."""
+        out: list[dict] = []
+        page = 1
+        while page <= 10:
+            r = self._c.get(
+                f"{self._base}/comments",
+                params={"per_page": 100, "page": page},
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            r.raise_for_status()
+            batch = r.json()
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return out
+
+    def resolved_threads(self) -> set[str]:
+        """Comment node IDs in threads a human marked resolved.
+
+        Resolution only exists in GraphQL — REST has no notion of it.
+        """
+        query = """
+        query($owner:String!,$name:String!,$number:Int!) {
+          repository(owner:$owner,name:$name) {
+            pullRequest(number:$number) {
+              reviewThreads(first:100) {
+                nodes { isResolved comments(first:50) { nodes { body } } }
+              }
+            }
+          }
+        }
+        """
+        try:
+            r = self._c.post(
+                "/graphql",
+                json={
+                    "query": query,
+                    "variables": {
+                        "owner": self.ref.owner,
+                        "name": self.ref.repo,
+                        "number": self.ref.number,
+                    },
+                },
+            )
+            r.raise_for_status()
+            data = r.json()["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        except Exception as e:  # noqa: BLE001 - feedback is best-effort
+            log.warning("could not read resolved threads: %s", e)
+            return set()
+
+        found: set[str] = set()
+        for thread in data:
+            if not thread.get("isResolved"):
+                continue
+            for c in thread.get("comments", {}).get("nodes", []):
+                found.update(MARKER.findall(c.get("body") or ""))
+        return found
+
+    def thumbs_down(self) -> set[str]:
+        """Fingerprints of comments a human reacted to with a thumbs-down."""
+        found: set[str] = set()
+        for c in self.review_comments():
+            fps = MARKER.findall(c.get("body") or "")
+            if not fps:
+                continue
+            reactions = c.get("reactions") or {}
+            if reactions.get("-1", 0) > 0:
+                found.update(fps)
+        return found
+
     def submit_review(self, body: str, comments: list[dict[str, Any]], commit_sha: str) -> None:
         """Post one review containing all inline comments.
 

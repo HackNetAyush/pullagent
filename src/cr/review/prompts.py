@@ -32,7 +32,21 @@ verification stage does that. Your job here is coverage: it is better to surface
 finding that later gets filtered out than to silently drop a real bug.
 
 Anchor every finding to specific lines that exist in the diff or in the provided related \
-code. Never cite a line you have not been shown."""
+code. Never cite a line you have not been shown.
+
+Calibrate confidence against these anchors. Under-rating a real defect is as harmful as \
+over-rating a guess: downstream filters drop low-confidence findings, so a genuine bug \
+marked 0.4 gets silently discarded.
+
+- 0.9-1.0   You traced the exact code path. The failure is certain given the inputs you name.
+- 0.7-0.9   The defect is clear from the code shown and nothing visible prevents it.
+- 0.5-0.7   Likely wrong, but something outside the shown code could guard against it.
+- 0.3-0.5   A real pattern-level concern; you cannot confirm it is reachable here.
+- below 0.3 Speculation. Do not report it.
+
+A textbook defect you can point at in the diff — an off-by-one, an inverted comparison, a \
+type mismatch, a validation that disagrees with the thing it guards — is 0.8 or above, even \
+when it looks small. Severity, not confidence, is where you express that it is minor."""
 
 
 # Each finder is one lens. Running them as separate passes over a shared cached

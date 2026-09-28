@@ -16,6 +16,7 @@ from cr.llm.client import LLMClient, build_pool
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
 from cr.models import Finding, FindingList, ReviewResult, Verdict, VerifiedFinding
 from cr.review import prompts
+from cr.store import db as store
 
 log = logging.getLogger(__name__)
 
@@ -141,14 +142,25 @@ async def verify(
     return list(await asyncio.gather(*(one(f) for f in findings)))
 
 
-def gate(verified: list[VerifiedFinding], tier: TierConfig) -> tuple[list, list]:
+def gate(
+    verified: list[VerifiedFinding],
+    tier: TierConfig,
+    suppressed_fps: set[str] | None = None,
+) -> tuple[list, list]:
     """Stage 8 — survivors, ranked, capped.
 
     The comment budget is a feature. Anything past the cap is real but not worth
     a developer's attention today; it goes to the collapsed section.
     """
-    survivors = [v for v in verified if v.survived]
-    killed = [v for v in verified if not v.survived]
+    fps = suppressed_fps or set()
+    # A human already rejected these. Re-posting them is how a reviewer loses trust.
+    memory_killed = [v for v in verified if v.finding.fingerprint() in fps]
+    remaining = [v for v in verified if v.finding.fingerprint() not in fps]
+    if memory_killed:
+        log.info("suppression memory dropped %d finding(s)", len(memory_killed))
+
+    survivors = [v for v in remaining if v.survived]
+    killed = memory_killed + [v for v in remaining if not v.survived]
     survivors.sort(key=lambda v: v.rank, reverse=True)
     return survivors[: tier.max_comments], killed + survivors[tier.max_comments :]
 
@@ -160,6 +172,7 @@ async def review(
     tier: TierConfig,
     client: LLMClient | None = None,
     cfg: Settings | None = None,
+    remember: bool = True,
 ) -> ReviewResult:
     s = cfg or default_settings
     llm = client or LLMClient(pool=build_pool(s))
@@ -174,7 +187,11 @@ async def review(
     log.info("prefilter kept %d, dropped %d", len(candidates), len(dropped))
 
     verified = await verify(llm, builder, tier, candidates) if candidates else []
-    posted, suppressed = gate(verified, tier)
+
+    fps = store.suppressed_fingerprints(repo.slug) if remember else set()
+    posted, suppressed = gate(verified, tier, fps)
+    if fps:
+        store.bump_hits(repo.slug, {v.finding.fingerprint() for v in suppressed} & fps)
 
     return ReviewResult(
         tier=tier.name,
