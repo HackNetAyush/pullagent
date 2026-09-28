@@ -21,6 +21,7 @@ from rich.table import Table
 
 from cr.config import TIERS, settings
 from cr.diff import DiffSet, collect, parse
+from cr.doctor import run as doctor_run
 from cr.github import GitHubPR, PRRef, build_review, pr_from_env
 from cr.lint import analyse
 from cr.llm.client import RATES
@@ -111,7 +112,16 @@ def _render(result: ReviewResult, model: str) -> None:
         )
 
 
-def _require_anthropic_key() -> None:
+def _require_credentials() -> None:
+    """Provider-aware credential check — Foundry uses a different key entirely."""
+    if settings.provider == "foundry":
+        if not settings.azure_api_key:
+            console.print("[red]Set CR_AZURE_API_KEY (CR_PROVIDER=foundry).[/red]")
+            raise typer.Exit(2)
+        if not (settings.azure_resource or settings.azure_base_url):
+            console.print("[red]Set CR_AZURE_RESOURCE or CR_AZURE_BASE_URL.[/red]")
+            raise typer.Exit(2)
+        return
     if not settings.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         console.print("[red]No Anthropic API key. Set CR_ANTHROPIC_API_KEY.[/red]")
         raise typer.Exit(2)
@@ -154,7 +164,7 @@ def review(
         description="Uncommitted working-tree changes." if not base else f"Changes since {base}.",
         diff=DiffSet(files=filtered, base=diff.base, head=diff.head).render(),
     )
-    _require_anthropic_key()
+    _require_credentials()
 
     result = asyncio.run(
         run_review(repo=RepoContext(slug=repo.resolve().name), pr=pr, tier=cfg)
@@ -186,7 +196,7 @@ def review_pr(
     and authenticates with GITHUB_TOKEN, so it just works inside Actions.
     """
     _setup_logging(verbose)
-    _require_anthropic_key()
+    _require_credentials()
 
     ref = _parse_pr_arg(pr) if pr else pr_from_env()
     if ref is None:
@@ -264,6 +274,49 @@ def review_pr(
 
         gh.submit_review(body, comments, meta["head"]["sha"])
         console.print(f"[green]Posted {len(comments)} inline comment(s).[/green]")
+
+
+@app.command()
+def doctor(
+    model: Annotated[str | None, typer.Option("--model", "-m")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Probe the provider: reachability, structured outputs, and prompt caching.
+
+    Costs a fraction of a cent. Run this before your first review — on Foundry,
+    caching is a beta capability, so whether it actually works is a real question
+    and every cost estimate depends on the answer.
+    """
+    _setup_logging(verbose)
+    target = model or TIERS["T2"].model
+    console.print(f"[dim]provider={settings.provider} model={target}[/dim]\n")
+
+    report = doctor_run(settings, target)
+
+    def mark(ok: bool) -> str:
+        return "[green]yes[/green]" if ok else "[red]no[/red]"
+
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_row("reachable", mark(report.reachable))
+    t.add_row("structured outputs", mark(report.structured_outputs))
+    t.add_row("effort accepted", mark(report.effort_accepted))
+    t.add_row("prompt caching", mark(report.caching_works))
+    t.add_row("cache write / read", f"{report.cache_write_tokens:,} / {report.cache_read_tokens:,}")
+    t.add_row("probe cost", f"${report.cost_usd:.5f}")
+    console.print(Panel(t, title="doctor", border_style="dim", title_align="left"))
+
+    for err in report.errors:
+        console.print(f"[red]error:[/red] {err}")
+
+    if report.healthy and not report.caching_works:
+        console.print(
+            "\n[yellow]Caching is not taking effect.[/yellow] It still works, but input "
+            "costs will be roughly 5x the figures in the docs. Check that prompt caching "
+            "is enabled for this deployment."
+        )
+    if not report.healthy:
+        raise typer.Exit(1)
+    console.print("\n[green]Ready.[/green]")
 
 
 @app.command()

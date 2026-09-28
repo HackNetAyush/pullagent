@@ -7,8 +7,10 @@ that are right beat twenty that are mostly noise.
 
 ## Ship it on your repo in 5 minutes
 
-**1.** Add your Anthropic key as a repo secret named `ANTHROPIC_API_KEY`
-(Settings → Secrets and variables → Actions → New repository secret).
+**1.** Add your provider key as a repo secret.
+
+*Microsoft Foundry (Claude on Azure):* secret `AZURE_API_KEY`.
+*First-party Anthropic:* secret `ANTHROPIC_API_KEY`.
 
 **2.** Drop this in `.github/workflows/review.yml`:
 
@@ -35,8 +37,20 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: YOUR_ORG/CR@main
         with:
+          provider: foundry
+          azure-api-key: ${{ secrets.AZURE_API_KEY }}
+          azure-resource: sweden-foundary
+```
+
+<details>
+<summary>First-party Anthropic instead</summary>
+
+```yaml
+      - uses: YOUR_ORG/CR@main
+        with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+</details>
 
 **3.** Open a PR. That's it — no server, no database, no GitHub App registration.
 
@@ -44,9 +58,10 @@ jobs:
 
 ```bash
 uv sync
-export CR_ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env    # fill in your provider credentials
 export GITHUB_TOKEN=ghp_...
 
+uv run cr doctor                              # verify provider + caching first
 uv run cr review                              # uncommitted changes
 uv run cr review --base main                  # main..HEAD
 uv run cr review-pr --pr owner/repo#42 --dry-run   # a real PR, printed not posted
@@ -93,6 +108,19 @@ PR diff → triage → lint (subtracts) → find (N lenses) → verify (refute) 
   marker, so re-running on a new push never reposts the same finding.
 
 Cost: **$0.00** (T0) · **~$0.02** (T1) · **~$0.23** (T2) · **~$0.50** (T3).
+
+## Providers
+
+| | `CR_PROVIDER` | Notes |
+|---|---|---|
+| Microsoft Foundry | `foundry` | Keeps explicit `cache_control`, structured outputs and the effort ladder, so the cached-prefix design survives intact. No Batch API. Caching is beta there — run `cr doctor` to confirm it is actually on. |
+| Anthropic first-party | `anthropic` | Everything, including Batch. |
+
+Model IDs are env-overridable (`CR_MODEL_STANDARD`, `CR_MODEL_DEEP`,
+`CR_MODEL_VERIFIER`) because Foundry routes by *deployment name*, which need not
+match the canonical model ID. Defaults: Sonnet 5 for finders, Opus 5 for T3
+verification. **No Haiku tier** — not every deployment has one, and Sonnet at
+`effort=low` is close enough in cost without adding a required model.
 
 ## Design docs
 

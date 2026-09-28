@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,12 +17,29 @@ class TierConfig(BaseModel):
     max_comments: int
 
 
+def _model(env_var: str, default: str) -> str:
+    """Model IDs are env-overridable because Microsoft Foundry routes by
+    *deployment name*, which may not match the canonical model ID."""
+    return os.environ.get(env_var, "").strip() or default
+
+
+# Defaults assume Claude Sonnet 5 and Opus 5 are available. There is deliberately
+# no Haiku tier: not every deployment has one, and Sonnet at effort=low is close
+# enough in cost while removing a model from the required set.
+MODEL_SMALL = _model("CR_MODEL_SMALL", "claude-sonnet-5")
+MODEL_STANDARD = _model("CR_MODEL_STANDARD", "claude-sonnet-5")
+MODEL_DEEP = _model("CR_MODEL_DEEP", "claude-sonnet-5")
+
+# T3 escalates verification only — the finders stay on the cheaper model.
+T3_VERIFIER_MODEL = _model("CR_MODEL_VERIFIER", "claude-opus-5")
+
+
 # ARCHITECTURE.md §3.2. Costs in PIPELINE.md §2.1 assume prompt caching is working.
 TIERS: dict[str, TierConfig] = {
-    # ~$0.02 — small, low-blast-radius changes.
+    # Small, low-blast-radius changes.
     "T1": TierConfig(
         name="T1",
-        model="claude-haiku-4-5",
+        model=MODEL_SMALL,
         effort="low",
         finders=["correctness"],
         verifier_lenses=["evidence"],
@@ -29,7 +48,7 @@ TIERS: dict[str, TierConfig] = {
     # ~$0.23 — the 80% case.
     "T2": TierConfig(
         name="T2",
-        model="claude-sonnet-5",
+        model=MODEL_STANDARD,
         effort="high",
         finders=["correctness", "api_contract", "test_coverage"],
         verifier_lenses=["correctness", "reachability"],
@@ -38,7 +57,7 @@ TIERS: dict[str, TierConfig] = {
     # ~$0.50 — auth, payments, migrations, concurrency, or very large diffs.
     "T3": TierConfig(
         name="T3",
-        model="claude-sonnet-5",
+        model=MODEL_DEEP,
         effort="xhigh",
         finders=[
             "correctness",
@@ -52,9 +71,6 @@ TIERS: dict[str, TierConfig] = {
         max_comments=8,
     ),
 }
-
-# T3 escalates verification to Opus 5 — the finders stay on Sonnet.
-T3_VERIFIER_MODEL = "claude-opus-5"
 
 
 class Settings(BaseSettings):
