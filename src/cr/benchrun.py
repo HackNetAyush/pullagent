@@ -183,12 +183,12 @@ def run_benchmark(
     tier = TIERS[tier_name]
     entries = data["prs"][:limit] if limit else data["prs"]
 
-    results: list[PRResult] = []
-    for i, entry in enumerate(entries, 1):
-        log.info("[%d/%d] %s", i, len(entries), entry["pr"])
-        results.append(
-            asyncio.run(
-                run_pr(
+    async def _all() -> list[PRResult]:
+        out: list[PRResult] = []
+        for i, entry in enumerate(entries, 1):
+            log.info("[%d/%d] %s", i, len(entries), entry["pr"])
+            out.append(
+                await run_pr(
                     entry,
                     slug,
                     tier,
@@ -197,7 +197,9 @@ def run_benchmark(
                     max_diff_chars=max_diff_chars,
                 )
             )
-        )
+        return out
+
+    results: list[PRResult] = asyncio.run(_all())
 
     scored = [r for r in results if not r.skipped]
     expected = sum(r.expected for r in scored)

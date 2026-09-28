@@ -109,6 +109,10 @@ def mine(
             for com in rc.json():
                 if kept >= max_comments_per_pr:
                     break
+                # Replies continue someone else's thread; they are not
+                # independent review findings and must not become ground truth.
+                if com.get("in_reply_to_id"):
+                    continue
                 author = (com.get("user") or {}).get("login", "")
                 if any(b in author.lower() for b in BOT_MARKERS):
                     continue
