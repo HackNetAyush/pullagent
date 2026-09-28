@@ -105,7 +105,12 @@ def _render(result: ReviewResult, model: str) -> None:
     t.add_row("elapsed", f"{result.elapsed_s:.1f}s")
     console.print(Panel(t, title="run", border_style="dim", title_align="left"))
 
-    if u.cache_hit_ratio < 0.2 and u.cache_creation_input_tokens > 0:
+    if u.cache_read_input_tokens == 0 and u.cache_creation_input_tokens > 0:
+        console.print(
+            "[dim]cold cache — this run populated it; the next run on this repo "
+            "reads at 0.1x.[/dim]"
+        )
+    elif 0 < u.cache_hit_ratio < 0.2:
         console.print(
             "[yellow]warning:[/yellow] cache hit ratio is low — check for a silent "
             "invalidator, or a prefix below the model minimum. See PIPELINE.md §2.2."

@@ -116,3 +116,48 @@ def test_suppressed_rules_reach_the_model() -> None:
     rendered = pr.render()
     assert "DO NOT comment on these" in rendered
     assert "E501 line too long" in rendered
+
+
+def test_verifier_shares_the_finder_cache_prefix() -> None:
+    """The verifier must reuse the finders' system block byte-for-byte.
+
+    Regression guard: putting the verifier preamble in system[0] breaks the
+    prefix match at byte 0, so every verifier call silently pays full price.
+    Caught live on a real PR — the finder wrote 19,475 tokens and the verifier
+    read zero.
+    """
+    from cr.config import TIERS
+    from cr.models import Category, Evidence, Finding, Severity
+    from cr.review import engine
+
+    captured: list[dict] = []
+
+    class FakeClient:
+        usage = None
+
+        async def parse(self, **kw):
+            captured.append(kw)
+            raise RuntimeError("stop after capture")
+
+    finding = Finding(
+        claim="x",
+        failure_scenario="a concrete scenario long enough to pass prefilter",
+        evidence=[Evidence(file="a.py", start_line=1, end_line=2, why="w")],
+        category=Category.CORRECTNESS,
+        severity=Severity.HIGH,
+        confidence=0.9,
+    )
+
+    import asyncio
+
+    b = _builder()
+    asyncio.run(engine.verify(FakeClient(), b, TIERS["T1"], [finding]))
+
+    assert captured, "verifier never issued a call"
+    assert captured[0]["system"] == b.system(), (
+        "verifier system block diverged from the finders' — cache prefix broken"
+    )
+    # The role text must appear after the cache breakpoint, not before it.
+    trailing = captured[0]["messages"][0]["content"][-1]["text"]
+    assert "REFUTE" in trailing
+    assert "cache_control" not in trailing

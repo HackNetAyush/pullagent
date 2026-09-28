@@ -104,11 +104,15 @@ async def verify(
                 client.parse(
                     model=model,
                     schema=Verdict,
-                    system=[
-                        {"type": "text", "text": prompts.VERIFIER_PREAMBLE},
-                        builder.system()[1],  # same cached repo block
-                    ],
-                    messages=builder.messages(prompts.verifier_instruction(lens, payload)),
+                    # system must stay byte-identical to the finders' or the
+                    # prefix match breaks at byte 0 and nothing reads the cache.
+                    # The verifier role goes in the trailing uncached block.
+                    system=builder.system(),
+                    messages=builder.messages(
+                        prompts.VERIFIER_PREAMBLE
+                        + "\n\n"
+                        + prompts.verifier_instruction(lens, payload)
+                    ),
                     effort=tier.effort,
                     max_tokens=4000,
                     label=f"verify:{lens}",
