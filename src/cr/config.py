@@ -25,35 +25,25 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
 
-    # Microsoft Foundry, shared credentials. Set CR_AZURE_RESOURCE for the
-    # standard endpoint shape, or CR_AZURE_BASE_URL to point at it directly.
+    # Foundry: set resource for the standard endpoint shape, or base_url directly.
     azure_api_key: str | None = None
     azure_resource: str | None = None
     azure_base_url: str | None = None
 
-    # Per-role overrides, for when deployments sit behind different endpoints or
-    # keys. Blank values fall back to the shared ones above, so the common
-    # single-resource case needs none of these.
+    # Per-role overrides; blank falls back to the shared values above.
     finder_base_url: str | None = None
     finder_api_key: str | None = None
     verifier_base_url: str | None = None
     verifier_api_key: str | None = None
 
-    # Model identifiers. These must live on Settings rather than being read from
-    # os.environ directly: pydantic-settings loads .env into *this object*, not
-    # into the process environment, so an os.environ lookup would silently ignore
-    # every override written in .env.
-    #
-    # On Foundry these are DEPLOYMENT names, which need not match canonical model
-    # IDs. There is deliberately no Haiku tier — not every deployment has one, and
-    # Sonnet at effort=low is close enough in cost without adding a required model.
+    # Foundry deployment names. Must be Settings fields, not os.environ lookups:
+    # pydantic-settings loads .env into this object, not the process env.
     model_small: str = "claude-sonnet-5"
     model_standard: str = "claude-sonnet-5"
     model_deep: str = "claude-sonnet-5"
     model_verifier: str = "claude-opus-5"
 
-    # Triage thresholds (hunks/files, deliberately NOT token counts — routing must
-    # not depend on which model's tokenizer you would have used).
+    # Hunks/files, not token counts: routing must not depend on a tokenizer.
     t1_max_hunks: int = 8
     t1_max_files: int = 3
     t3_min_hunks: int = 40
@@ -94,8 +84,7 @@ class Settings(BaseSettings):
         ".generated.",
     )
 
-    # Hard context ceiling. We have 1M available; using it degrades quality and
-    # costs linearly. Treat the window as headroom for the rare huge PR.
+    # Hard ceiling. 1M is available but using it degrades quality and costs linearly.
     max_context_tokens: int = 25_000
 
     # Findings below this confidence are dropped before verification.
@@ -108,12 +97,8 @@ class Settings(BaseSettings):
         return base, key
 
     def unfilled(self) -> list[str]:
-        """Settings still holding the .env template placeholder.
-
-        Worth reporting explicitly: a placeholder key produces an authentication
-        error that reads like a broken endpoint, which sends you debugging the
-        wrong thing.
-        """
+        """Settings still holding the .env placeholder. A placeholder key looks
+        like a broken endpoint, so report it by name."""
         out = []
         for name in ("azure_api_key", "azure_resource", "azure_base_url", "anthropic_api_key"):
             value = getattr(self, name, None)

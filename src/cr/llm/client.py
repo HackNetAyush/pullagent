@@ -50,13 +50,8 @@ class Call:
 
 
 class ClientPool:
-    """Routes each model to the transport configured for it.
-
-    Most setups have one endpoint and one key, in which case every model resolves
-    to the same client and this is a no-op. It exists because Foundry deployments
-    can legitimately sit behind different resources or projects, and discovering
-    that mid-review is unpleasant.
-    """
+    """Routes each model to its configured transport. A no-op when one endpoint
+    serves everything; Foundry deployments can sit behind different resources."""
 
     def __init__(self, default: Any, by_model: dict[str, Any] | None = None) -> None:
         self._default = default
@@ -114,14 +109,10 @@ def build_pool(settings: Any) -> ClientPool:
 
 
 def build_client(settings: Any) -> Any:
-    """Pick the transport. Both speak the identical Messages API surface, so
-    nothing downstream of this function knows or cares which one it got.
+    """Pick the transport. Both speak the same Messages API surface.
 
-    Claude on Microsoft Foundry keeps every capability this design depends on —
-    explicit `cache_control` breakpoints, structured outputs, and the effort
-    ladder — so the cached-prefix architecture survives the move intact. The one
-    real loss is the Batch API, which Foundry does not offer (BACKLOG.md CR-32
-    becomes first-party-only).
+    Foundry keeps cache_control, structured outputs and the effort ladder; it has
+    no Batch API (BACKLOG.md CR-32 is first-party only).
     """
     provider = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
 
@@ -203,13 +194,8 @@ class LLMClient:
         max_tokens: int = 16000,
         label: str = "",
     ) -> Call:
-        """A single structured-output call.
-
-        Structured outputs are enforced API-side, so there is no JSON-scraping and
-        no parse-retry loop. Thinking stays adaptive — never disable it to save
-        money, use `effort` instead (disabling it on Opus 5 makes tool calls leak
-        into visible text as prose, and the call silently never runs).
-        """
+        """One structured-output call. Schema is enforced API-side, so no
+        JSON-scraping. Never disable thinking to save money — lower `effort`."""
         async with self._sem:
             resp = await self._for(model).messages.parse(
                 model=model,

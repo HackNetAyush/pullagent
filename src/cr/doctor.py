@@ -1,15 +1,6 @@
-"""Connectivity and capability probe.
-
-Answers three questions in about ten seconds and a fraction of a cent:
-
-1. Can we reach the provider at all, with these credentials?
-2. Does this deployment accept the request shape we depend on — structured
-   outputs and the effort parameter?
-3. **Is prompt caching actually working?** On Microsoft Foundry caching is a beta
-   capability, so this is a real question rather than a formality. If it is off,
-   every cost figure in the docs is wrong by roughly 5x and you want to know now
-   rather than from an invoice.
-"""
+"""Connectivity probe: reachability, structured outputs, and whether prompt
+caching actually works. Caching is beta on Foundry — if it is off, every cost
+figure in the docs is wrong by ~5x."""
 
 from __future__ import annotations
 
