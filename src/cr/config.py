@@ -1,0 +1,115 @@
+"""Configuration. Tier routing lives here because it is a product decision."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class TierConfig(BaseModel):
+    name: str
+    model: str
+    effort: str
+    finders: list[str]
+    verifier_lenses: list[str]
+    max_comments: int
+
+
+# ARCHITECTURE.md §3.2. Costs in PIPELINE.md §2.1 assume prompt caching is working.
+TIERS: dict[str, TierConfig] = {
+    # ~$0.02 — small, low-blast-radius changes.
+    "T1": TierConfig(
+        name="T1",
+        model="claude-haiku-4-5",
+        effort="low",
+        finders=["correctness"],
+        verifier_lenses=["evidence"],
+        max_comments=3,
+    ),
+    # ~$0.23 — the 80% case.
+    "T2": TierConfig(
+        name="T2",
+        model="claude-sonnet-5",
+        effort="high",
+        finders=["correctness", "api_contract", "test_coverage"],
+        verifier_lenses=["correctness", "reachability"],
+        max_comments=6,
+    ),
+    # ~$0.50 — auth, payments, migrations, concurrency, or very large diffs.
+    "T3": TierConfig(
+        name="T3",
+        model="claude-sonnet-5",
+        effort="xhigh",
+        finders=[
+            "correctness",
+            "security",
+            "concurrency",
+            "api_contract",
+            "test_coverage",
+            "performance",
+        ],
+        verifier_lenses=["correctness", "reachability", "evidence"],
+        max_comments=8,
+    ),
+}
+
+# T3 escalates verification to Opus 5 — the finders stay on Sonnet.
+T3_VERIFIER_MODEL = "claude-opus-5"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="CR_", env_file=".env", extra="ignore")
+
+    anthropic_api_key: str | None = None
+
+    # Triage thresholds (hunks/files, deliberately NOT token counts — routing must
+    # not depend on which model's tokenizer you would have used).
+    t1_max_hunks: int = 8
+    t1_max_files: int = 3
+    t3_min_hunks: int = 40
+
+    # Paths that force T3 regardless of size.
+    sensitive_patterns: tuple[str, ...] = (
+        "auth",
+        "login",
+        "session",
+        "password",
+        "crypto",
+        "payment",
+        "billing",
+        "migration",
+        "migrations",
+        "permission",
+        "acl",
+        "token",
+    )
+
+    # Paths that never warrant a review (T0 — exits before any model call).
+    skip_patterns: tuple[str, ...] = (
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "poetry.lock",
+        "uv.lock",
+        "Cargo.lock",
+        "go.sum",
+        "/vendor/",
+        "/node_modules/",
+        "/dist/",
+        "/build/",
+        ".min.js",
+        ".min.css",
+        ".snap",
+        "_pb2.py",
+        ".generated.",
+    )
+
+    # Hard context ceiling. We have 1M available; using it degrades quality and
+    # costs linearly. Treat the window as headroom for the rare huge PR.
+    max_context_tokens: int = 25_000
+
+    # Findings below this confidence are dropped before verification.
+    min_confidence: float = 0.35
+
+
+settings = Settings()

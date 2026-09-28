@@ -1,0 +1,5 @@
+This product includes software developed by The PR Agent contributors.
+
+Portions of vendor/pr_agent/ are copied from https://github.com/The-PR-Agent/pr-agent
+and are licensed under the MIT License. See vendor/pr_agent/LICENSE.pr-agent for the
+full licence text, and vendor/pr_agent/README.md for what was taken and why.
