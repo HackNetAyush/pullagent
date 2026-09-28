@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "<<< FILL ME >>>"
@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     provider: str = "anthropic"
 
     anthropic_api_key: str | None = None
+
+    # Accepts bare GITHUB_TOKEN too, so .env and CI env vars both work.
+    github_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CR_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"),
+    )
 
     # Foundry: set resource for the standard endpoint shape, or base_url directly.
     azure_api_key: str | None = None

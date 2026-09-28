@@ -206,9 +206,11 @@ def review_pr(
         )
         raise typer.Exit(2)
 
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token = settings.github_token
     if not token:
-        console.print("[red]GITHUB_TOKEN is not set.[/red]")
+        console.print(
+            "[red]GITHUB_TOKEN is not set.[/red] Add it to .env or export it."
+        )
         raise typer.Exit(2)
 
     console.print(f"[dim]Reviewing {ref.slug}#{ref.number}[/dim]")
