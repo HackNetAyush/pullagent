@@ -27,8 +27,10 @@ from cr.lint import analyse
 from cr.llm.client import RATES
 from cr.llm.prefix import PRContext, RepoContext
 from cr.models import ReviewResult, Severity
+from cr.repo import RepoCache, default_cache_dir
 from cr.review.engine import review as run_review
 from cr.triage import triage
+from cr.warm import context_for_pr, index_repo
 
 
 def _force_utf8() -> None:
@@ -193,6 +195,7 @@ def review_pr(
     ] = Path("."),
     tier: Annotated[str | None, typer.Option("--tier", "-t")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print instead of posting")] = False,
+    no_graph: Annotated[bool, typer.Option("--no-graph", help="Skip cross-file context")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Review a GitHub pull request and post the findings.
@@ -250,10 +253,22 @@ def review_pr(
             console.print(f"[dim]linters reported {len(lint.rules)} rule(s); suppressed[/dim]")
 
         keep = set(reviewable)
+        slice_text = "" if no_graph else context_for_pr(
+            ref.slug,
+            ref.number,
+            meta["head"]["sha"],
+            meta["base"]["sha"],
+            keep,
+            token,
+        )
+        if slice_text:
+            console.print(f"[dim]graph context: {len(slice_text):,} chars[/dim]")
+
         pr_ctx = PRContext(
             title=meta.get("title") or f"PR #{ref.number}",
             description=(meta.get("body") or "")[:4000],
             diff=DiffSet(files=[f for f in diffset.files if f.path in keep]).render(),
+            graph_slice=slice_text,
             lint_output=lint.output,
             suppressed_rules=lint.rules,
         )
@@ -324,6 +339,57 @@ def doctor(
     if not report.healthy:
         raise typer.Exit(1)
     console.print("\n[green]Ready.[/green]")
+
+
+@app.command()
+def index(
+    slug: Annotated[str, typer.Argument(help="owner/repo")],
+    ref: Annotated[str, typer.Option("--ref", help="Branch or SHA to index")] = "HEAD",
+    force: Annotated[bool, typer.Option("--force", help="Rebuild even if cached")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Clone and index a repo so later reviews are fast and see cross-file context.
+
+    Run once per repo. Re-run after big merges to keep the index close to HEAD;
+    reviews will otherwise build the delta themselves on first use.
+    """
+    _setup_logging(verbose)
+    token = settings.github_token
+    if not token:
+        console.print("[yellow]No GITHUB_TOKEN — private repos will fail.[/yellow]")
+
+    r = index_repo(slug, token, ref=ref, force=force)
+
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_row("repo", r.slug)
+    t.add_row("commit", r.commit[:12])
+    t.add_row("clone", "cold (first time)" if r.was_cold else "warm")
+    t.add_row("index", "reused" if r.reused else f"built in {r.seconds:.1f}s")
+    t.add_row("files / symbols / refs", f"{r.files:,} / {r.symbols:,} / {r.refs:,}")
+    console.print(Panel(t, title="index", border_style="dim", title_align="left"))
+    console.print(
+        "\n[green]Warm.[/green] Reviews on this repo now include "
+        "cross-file context."
+    )
+
+
+@app.command("cache-info")
+def cache_info() -> None:
+    """Show what is cached on disk."""
+    cache = RepoCache(default_cache_dir())
+    t = Table("repo", "mirror", "indexes")
+    mirrors = sorted((cache.root / "mirrors").glob("*.git"))
+    graphs = cache.root / "graphs"
+    for m in mirrors:
+        slug = m.stem.replace("__", "/")
+        n = len(list((graphs / m.stem).glob("*.json.gz"))) if (graphs / m.stem).is_dir() else 0
+        size = sum(f.stat().st_size for f in m.rglob("*") if f.is_file()) / 1e6
+        t.add_row(slug, f"{size:,.0f} MB", str(n))
+    if not mirrors:
+        console.print(f"[dim]Nothing cached yet in {cache.root}[/dim]")
+        return
+    console.print(t)
+    console.print(f"[dim]{cache.root}[/dim]")
 
 
 @app.command()
