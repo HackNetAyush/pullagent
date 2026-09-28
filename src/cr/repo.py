@@ -124,7 +124,13 @@ class RepoCache:
             return None
 
     def co_change(
-        self, slug: str, paths: set[str], *, months: int = 6, top: int = 12
+        self,
+        slug: str,
+        paths: set[str],
+        *,
+        months: int = 6,
+        top: int = 12,
+        min_count: int = 2,
     ) -> list[tuple[str, int]]:
         """Files that historically change in the same commit as `paths`.
 
@@ -160,4 +166,7 @@ class RepoCache:
                 if f not in paths:
                     counts[f] = counts.get(f, 0) + 1
 
-        return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top]
+        # A single co-occurrence is usually the initial commit, where every file
+        # landed together. That is noise, and noise in context costs precision.
+        ranked = [(f, n) for f, n in counts.items() if n >= min_count]
+        return sorted(ranked, key=lambda kv: kv[1], reverse=True)[:top]

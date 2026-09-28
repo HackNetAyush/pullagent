@@ -125,8 +125,13 @@ def context_for_pr(
 
         co = cache.co_change(slug, changed)
 
-        # Snippets need the real files, so check out the head we are reviewing.
         with cache.worktree(slug, head_sha) as tree:
+            # Base-graph + delta (PIPELINE.md 3.2). The PR's files may not exist
+            # at the base commit at all, so re-index them from head and merge.
+            # Without this, a PR that adds files has no symbols and the slice is
+            # empty — which is the whole feature silently doing nothing.
+            graph.drop_files(changed)
+            g.index_files(tree, [tree / c for c in changed if (tree / c).is_file()], graph)
             return g.render_slice(graph, changed, co, root=tree)
     except Exception as e:  # noqa: BLE001 - context is an enhancement, never a hard dependency
         log.warning("graph context unavailable: %s", e)

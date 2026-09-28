@@ -159,6 +159,16 @@ class RepoGraph:
             build_seconds=d.get("build_seconds", 0.0),
         )
 
+    def drop_files(self, paths: set[str]) -> None:
+        """Remove entries for these files so they can be re-indexed cleanly."""
+        for table in (self.defs, self.refs):
+            for name in list(table):
+                kept = [loc for loc in table[name] if loc[0] not in paths]
+                if kept:
+                    table[name] = kept
+                else:
+                    del table[name]
+
     def definitions_in(self, paths: set[str]) -> set[str]:
         """Symbol names defined in the given files."""
         out: set[str] = set()

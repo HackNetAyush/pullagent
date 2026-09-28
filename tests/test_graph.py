@@ -70,3 +70,50 @@ def test_slice_names_the_callers(tmp_path) -> None:
 def test_graph_survives_a_round_trip() -> None:
     g = RepoGraph(commit="abc", defs={"f": [["a.py", 1]]}, refs={"f": [["b.py", 9]]}, files=2)
     assert RepoGraph.from_json(g.to_json()).defs == g.defs
+
+
+def test_delta_reindex_replaces_not_duplicates(tmp_path) -> None:
+    """A PR's files get re-indexed from head. Without drop_files the base entries
+    survive and every symbol appears twice."""
+    (tmp_path / "a.ts").write_text("export function alpha() { return 1 }\n", encoding="utf-8")
+    g = build(tmp_path)
+    assert len(g.defs["alpha"]) == 1
+
+    from cr.graph import index_files
+
+    g.drop_files({"a.ts"})
+    index_files(tmp_path, [tmp_path / "a.ts"], g)
+    assert len(g.defs["alpha"]) == 1
+
+
+def test_pr_that_adds_a_file_still_gets_symbols(tmp_path) -> None:
+    """Regression: base graph has no entry for a file the PR creates, so the
+    slice came back empty and cross-file context silently did nothing."""
+    from cr.graph import index_files
+
+    (tmp_path / "existing.ts").write_text(
+        "import { fresh } from './new'\nexport function useIt() { return fresh() }\n",
+        encoding="utf-8",
+    )
+    base = build(tmp_path)
+    assert "fresh" not in base.defs
+
+    (tmp_path / "new.ts").write_text("export function fresh() { return 2 }\n", encoding="utf-8")
+    base.drop_files({"new.ts"})
+    index_files(tmp_path, [tmp_path / "new.ts"], base)
+
+    assert "fresh" in base.defs
+    callers = base.callers_of({"fresh"}, exclude={"new.ts"})
+    assert any(f == "existing.ts" for _n, f, _l in callers)
+
+
+def test_co_change_drops_single_occurrences() -> None:
+    """Every file co-occurs once in the initial commit. Surfacing that as
+    'related code' is pure noise."""
+    from cr.repo import RepoCache
+
+    cache = RepoCache.__new__(RepoCache)
+    counts = {"a.py": 1, "b.py": 5, "c.py": 2}
+    ranked = [(f, n) for f, n in counts.items() if n >= 2]
+    assert sorted(ranked, key=lambda kv: kv[1], reverse=True) == [("b.py", 5), ("c.py", 2)]
+    assert cache is not None
