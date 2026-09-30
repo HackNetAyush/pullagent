@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --extra dev --extra azure
+
+      - name: Lint
+        run: |
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+
+      - name: Tests
+        # No provider key and no CR_DB_URL: the suite must pass against SQLite
+        # with no network, or it is testing the developer's laptop.
+        run: uv run pytest -q
+
+  image:
+    # Proves the container builds on every PR. Pushing is the deploy workflow's
+    # job — a build that only happens at release time fails at the worst moment.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: cr:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Bicep
+        # Catches a malformed template here rather than halfway through a
+        # deployment that has already created half the resource group.
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null

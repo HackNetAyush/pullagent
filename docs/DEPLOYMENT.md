@@ -1,0 +1,158 @@
+# Running CR as a public App on Azure
+
+Publishing the App is what forces everything on this page. A private App can
+only be installed by its owner, so a webhook arriving was itself proof that
+somebody wanted it. A public App has no such proof: anyone can install it,
+deliveries arrive with no human in the loop, and each one spends your model
+budget. So the deployed service asks one question before anything costs money —
+*is this account approved?* — and the rest of the architecture follows from
+needing somewhere durable to keep that answer.
+
+```
+        GitHub ──webhook──► cr-web (always on, 0.5 vCPU)
+                              │  verify → allowlist → enqueue → 202
+                              ▼
+                        Postgres (what is current)  ──►  Service Bus (who wakes up)
+                                                              │
+                                                              ▼
+                                                        cr-worker (0 → 5 replicas)
+                                                          claim → review → post
+```
+
+---
+
+## What each piece is for
+
+**Postgres** holds the truth: the allowlist, sessions, run history, suppression
+memory, and the job table. `enqueue_job` supersedes older rows for a key at
+write time, which is what makes five pushes cost one review.
+
+**Service Bus** holds no state. Its messages say "look at job row N". A
+duplicate delivery, a redelivery after a crash, and a message that lost its
+race all converge on the same answer, because `claim_job` lets exactly one
+worker move a row from `queued` to `running`.
+
+**Azure Files**, mounted at `/cache`, holds the git mirrors. This is the one
+thing that genuinely needs a POSIX filesystem — git cannot maintain a mirror in
+blob storage. The symbol graphs and the review cache live there too, because
+everything under `CR_CACHE_DIR` already does and one mount is simpler than
+three storage integrations.
+
+**No Blob, no Redis.** Both were considered and neither earns its place yet.
+The review cache is content-addressed files on the share; the token cache is
+per-process and an hour long. Add Redis when the worker count makes repeated
+Postgres reads show up in a trace, not before.
+
+---
+
+## Deploy it
+
+### 1. Federate GitHub Actions to Azure
+
+Create an app registration with a federated credential for this repository, and
+give it Contributor on the resource group. Then set, as **repository secrets**:
+
+| Secret | What it is |
+| --- | --- |
+| `AZURE_CLIENT_ID` | the app registration |
+| `AZURE_TENANT_ID` | your tenant |
+| `AZURE_SUBSCRIPTION_ID` | the subscription |
+| `PG_PASSWORD` | a password you generate for Postgres |
+| `GH_APP_PRIVATE_KEY` | the App's PEM, pasted whole |
+| `GH_WEBHOOK_SECRET` | the App's webhook secret |
+| `GH_CLIENT_SECRET` | the App's OAuth client secret |
+| `CR_AZURE_API_KEY` | your Foundry key |
+
+and as **repository variables**:
+
+| Variable | Example |
+| --- | --- |
+| `AZURE_RESOURCE_GROUP` | `cr-prod` |
+| `ACR_NAME` | `crreviewacr` |
+| `APP_NAME` | `crreview` |
+| `GH_APP_ID` | `5130744` |
+| `GH_CLIENT_ID` | `Iv23li...` |
+| `CR_AZURE_RESOURCE` | `foundaryres03` |
+| `CR_ADMIN_LOGINS` | `HackNetAyush` |
+
+Secrets and variables may not begin with `GITHUB_` — Actions reserves that
+prefix, which is why the App id is `GH_APP_ID` here and `CR_GITHUB_APP_ID`
+inside the container.
+
+### 2. Push to `main`
+
+`.github/workflows/deploy.yml` builds the image in ACR, applies
+`infra/main.bicep`, and polls `/api/health` until the new revision answers. The
+job summary prints the webhook URL.
+
+### 3. Point the App at it
+
+In the App's settings, set the webhook URL to the address from the summary
+(`https://<fqdn>/webhook`) and the callback URL to `https://<fqdn>/auth/callback`.
+The smee relay is no longer involved.
+
+### 4. Make yourself an administrator, then approve yourself
+
+`CR_ADMIN_LOGINS` promotes you on your **first sign-in**, so visit the
+dashboard and sign in before anything else. Then:
+
+```bash
+cr app approve --all-installed     # everyone already using it keeps working
+cr app accounts                    # check
+```
+
+Without this the App is deployed and reviewing nothing, which is the correct
+failure but an alarming one if you are not expecting it.
+
+---
+
+## Turning on the allowlist without breaking existing users
+
+`CR_APP_REQUIRE_APPROVAL` defaults to **on**, because the cost of forgetting it
+on a public App is a stranger spending your budget, while the cost of it being
+on unnecessarily is one command. The consequence is that upgrading an existing
+installation stops reviews until an account is approved.
+
+`cr app approve --all-installed` exists for exactly that moment: it approves
+every account that already has the App installed, so nobody who was working
+yesterday is broken today. `check_ready()` also prints a warning at start-up
+when approval is required and nothing is approved, so the failure announces
+itself rather than looking like an outage.
+
+---
+
+## Operating it
+
+```bash
+cr app accounts                 # who is approved, denied, or waiting
+cr app approve <login>          # let an account in
+cr app deny <login>             # and back out again
+cr app admin <login>            # promote someone who has signed in once
+cr app status                   # installations, recent jobs, configuration
+```
+
+An account that is not approved still shows up: the ingress counts its dropped
+deliveries in `blocked_events`, so `cr app accounts` distinguishes "nobody has
+asked" from "somebody is knocking and getting nothing".
+
+---
+
+## What this deployment does not do
+
+**A running review cannot be cancelled across replicas.** In-process, a newer
+push cancels the asyncio task outright. Here the older review runs to
+completion and is stopped at the last moment by `job_is_current()`, immediately
+before it posts. The work is wasted; the output is never wrong.
+
+**Debounce is a scheduled message, not a sliding window.** Five pushes schedule
+five messages and four of them find a superseded row. Each costs one Postgres
+read, which is the trade for not holding a timer in a process that may vanish.
+
+**Postgres is reachable from Azure services generally.** The firewall rule is
+`AllowAllAzureServices`, because Container Apps egress addresses are not fixed.
+VNet integration is the upgrade when that stops being acceptable; it is a
+change to `infra/main.bicep` and nothing else.
+
+**The Bicep template has never been applied.** It compiles in CI (`az bicep
+build`) and the resource shapes follow current API versions, but no one has run
+it against a live subscription yet. Expect to fix something the first time.

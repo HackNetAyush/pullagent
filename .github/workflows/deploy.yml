@@ -1,0 +1,177 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing tag to roll back to. Leave blank to build HEAD.'
+        required: false
+
+# One deploy at a time, and never cancelled halfway: an interrupted revision
+# update can leave the web and worker revisions on different images.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  APP_NAME: ${{ vars.APP_NAME }}
+
+permissions:
+  id-token: write   # OIDC federation to Azure — no stored cloud credentials
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          TAG="$IMAGE_TAG"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_SHA::7}"; fi
+          if ! [[ "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid image tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=${{ vars.ACR_NAME }}.azurecr.io/cr:$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # A rollback names an image that already exists; rebuilding it would
+      # produce a different digest for the same tag and defeat the point.
+      - name: Skip build if the tag already exists
+        id: exists
+        run: |
+          set -o pipefail
+          if az acr repository show-tags -n "$ACR_NAME" --repository cr -o tsv 2>/dev/null \
+             | grep -qx "${{ steps.meta.outputs.tag }}"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.exists.outputs.found == 'false'
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        if: steps.exists.outputs.found == 'false'
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build and push
+        if: steps.exists.outputs.found == 'false'
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "cr:${{ steps.meta.outputs.tag }}" \
+            --file Dockerfile .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Bicep is the source of truth for everything except the image tag, so a
+      # deploy is a full template apply rather than a container-image poke. That
+      # is what stops the template and reality drifting until the next apply
+      # surprises someone.
+      - name: Apply infrastructure
+        env:
+          DEPLOY_IMAGE: ${{ needs.build.outputs.image }}
+          PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
+          GH_APP_ID: ${{ vars.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GH_CLIENT_ID: ${{ vars.GH_CLIENT_ID }}
+          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          CR_AZURE_API_KEY: ${{ secrets.CR_AZURE_API_KEY }}
+          CR_AZURE_RESOURCE: ${{ vars.CR_AZURE_RESOURCE }}
+          CR_ADMIN_LOGINS: ${{ vars.CR_ADMIN_LOGINS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          PARAM_FILE="$(mktemp "${RUNNER_TEMP}/cr-parameters.XXXXXX.json")"
+          trap 'rm -f "$PARAM_FILE"' EXIT
+          python - "$PARAM_FILE" <<'PY'
+          import json, os, sys
+
+          names = {
+              "name": "APP_NAME",
+              "image": "DEPLOY_IMAGE",
+              "pgPassword": "PG_PASSWORD",
+              "githubAppId": "GH_APP_ID",
+              "githubAppPrivateKey": "GH_APP_PRIVATE_KEY",
+              "githubWebhookSecret": "GH_WEBHOOK_SECRET",
+              "githubClientId": "GH_CLIENT_ID",
+              "githubClientSecret": "GH_CLIENT_SECRET",
+              "azureApiKey": "CR_AZURE_API_KEY",
+              "azureResource": "CR_AZURE_RESOURCE",
+              "adminLogins": "CR_ADMIN_LOGINS",
+          }
+          params = {key: {"value": os.environ[value]} for key, value in names.items()}
+          with open(sys.argv[1], "w", encoding="utf-8") as stream:
+              json.dump({"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#", "contentVersion": "1.0.0.0", "parameters": params}, stream)
+          PY
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters @"$PARAM_FILE" \
+            --query 'properties.outputs' -o json > outputs.json
+
+      - name: Wait for the ingress to answer
+        run: |
+          URL=$(jq -r '.webUrl.value' outputs.json)
+          echo "Deployed: $URL"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/health" || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ${i}0s"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::the new revision never became healthy"
+          # Surface why, rather than leaving someone to go hunting in the portal.
+          az containerapp logs show -n "$APP_NAME-web" -g "$RESOURCE_GROUP" --tail 50 || true
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### CR deployment"
+            echo ""
+            echo "- image: \`${{ needs.build.outputs.image }}\`"
+            echo "- webhook: \`$(jq -r '.webhookUrl.value' outputs.json 2>/dev/null)\`"
+            echo ""
+            echo "Point the GitHub App's webhook URL at that address if it changed."
+          } >> "$GITHUB_STEP_SUMMARY"

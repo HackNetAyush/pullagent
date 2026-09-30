@@ -14,7 +14,7 @@ import httpx
 from cr.bench import JUDGE_PREAMBLE, Match, judge_prompt
 from cr.config import TIERS, Settings, TierConfig
 from cr.diff import DiffSet, parse
-from cr.llm.client import RATES, LLMClient, build_pool
+from cr.llm.client import LLMClient, build_pool
 from cr.llm.prefix import PRContext, RepoContext
 from cr.review.engine import review as run_review
 from cr.triage import triage
@@ -44,7 +44,7 @@ class PRResult:
 def compare_diff(slug: str, base: str, head: str, token: str) -> str:
     """Diff exactly the range the human reviewed, not the merged result."""
     owner, repo = slug.split("/")
-    with httpx.Client(timeout=60.0) as c:
+    with httpx.Client(timeout=60.0, follow_redirects=True) as c:
         r = c.get(
             f"{API}/repos/{owner}/{repo}/compare/{base}...{head}",
             headers={
@@ -68,9 +68,7 @@ async def _judge(
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": judge_prompt(human, findings)}
-                ],
+                "content": [{"type": "text", "text": judge_prompt(human, findings)}],
             }
         ],
         effort="low",
@@ -112,9 +110,7 @@ async def run_pr(
         return res
 
     reviewable = {f.path for f in decision.reviewable}
-    body = DiffSet(files=[f for f in diffset.files if f.path in reviewable]).render(
-        max_chars=max_diff_chars
-    )
+    body = DiffSet(files=[f for f in diffset.files if f.path in reviewable]).render()
 
     number = int(entry["pr"].split("#")[1])
     slice_text = ""
@@ -136,23 +132,32 @@ async def run_pr(
         tier=tier,
         remember=False,
         source="bench",
+        head_sha=entry["head_sha"],
+        cfg=settings.model_copy(update={"finder_chunk_chars": max_diff_chars}),
     )
     res.posted = len(result.posted)
-    res.cost = result.usage.cost_usd(*RATES.get(tier.model, (3.0, 15.0)))
+    res.cost = result.cost_usd
+    if result.errors:
+        res.skipped = "incomplete review: " + "; ".join(result.errors)
+        return res
 
     findings = [
         {
             "file": v.finding.anchor_file,
             "line": v.finding.anchor_line,
-            "claim": v.finding.claim,
-            "failure_scenario": v.finding.failure_scenario,
+            "claim": v.final_claim,
+            "failure_scenario": v.final_failure_scenario,
         }
         for v in result.posted
     ]
 
+    # The judge always runs on a fixed Claude model, independent of tier.model:
+    # it has to stay Anthropic-shaped regardless of which finder model is under
+    # test (T4's isn't), and judging shouldn't use the same model being graded.
+    judge_model = settings.model_standard
     judge_llm = LLMClient(pool=build_pool(settings), max_concurrency=4)
     verdicts = await asyncio.gather(
-        *(_judge(judge_llm, tier.model, h, findings) for h in humans),
+        *(_judge(judge_llm, judge_model, h, findings) for h in humans),
         return_exceptions=True,
     )
     for h, m in zip(humans, verdicts, strict=False):
@@ -169,7 +174,7 @@ async def run_pr(
                 "url": h.get("url", ""),
             }
         )
-    res.cost += judge_llm.cost_usd(tier.model)
+    res.cost += judge_llm.cost_usd(judge_model)
     return res
 
 

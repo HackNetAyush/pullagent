@@ -267,7 +267,7 @@ of cost. This is what "utilising the model well" concretely means here.
 |---|---|---|
 | **Structured outputs** (`output_config.format` + Pydantic) | The finding schema, every verifier verdict | The API *enforces* the schema. No regex-scraping JSON out of prose, no parse-retry loop. Kills an entire class of production bug. |
 | **Prompt caching, 2 breakpoints** | §2.1 | 82% of input cost |
-| **Effort ladder** | `low` compression/triage · `high` finding · `xhigh` T3 verification | Biggest quality/cost dial. Sweep `low`/`medium` on the eval set — they're unusually strong now |
+| **Effort ladder** | `low` T1 finding · `medium` T2 finding + all verification · `high` T3 finding | Biggest quality/cost dial. `medium` beat `high` on both cost and recall for T2 on a real PR — swept, not assumed |
 | **Batch API (50% off)** | Nightly full-repo audits, base graph summarisation, eval backfill, repo-convention extraction at install | Async work should never pay sync prices |
 | **Programmatic tool calling** | "Check all 40 callers of this function" | Model writes a script; the 40 file reads execute in the code sandbox and **never enter context**. Otherwise that's 40 round-trips at ~2K tokens each |
 | **Advisor tool** (`advisor_20260301`) | Sonnet 5 finder consults Opus 5 mid-turn on a hard call | Server-side, no round-trip. Cheap executor, expensive advisor **only when stuck** — instead of running the whole pass on Opus |

@@ -1,0 +1,22 @@
+# Anything that would bloat the image or, worse, bake a secret into a layer.
+.env
+.env.*
+!.env.example
+.venv/
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+.cache/
+evals/
+scripts/
+tests/
+vendor/
+docs/
+dashboard/node_modules/
+dashboard/src/
+*.db
+*.bak
+HANDOFF.md

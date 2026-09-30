@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from cr.diff import number_patch
+
 # Patterns that silently destroy a cache entry if they appear in a cached block.
 # Every one of these has burned somebody. See PIPELINE.md §2.2 "Trap 2".
 _INVALIDATORS: list[tuple[str, re.Pattern[str]]] = [
@@ -102,7 +104,15 @@ class PRContext:
             parts.append(
                 f"\n## Related code (callers, implementors, co-changed)\n{self.graph_slice}"
             )
-        parts.append(f"\n## Diff\n```diff\n{self.diff}\n```")
+        # Numbered only here, at the last step before the model sees it. `self.diff`
+        # stays a parseable unified diff because `review_chunks` and `parse` both
+        # re-read it downstream; the gutter would break them.
+        parts.append(
+            "\n## Diff\n"
+            "The number before each line is its line number in the new file. Cite those "
+            "numbers; never count lines yourself.\n"
+            f"```diff\n{number_patch(self.diff)}\n```"
+        )
         return "\n".join(parts)
 
 

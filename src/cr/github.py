@@ -60,9 +60,9 @@ def pr_from_env() -> PRRef | None:
             event = json.loads(Path(event_path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             event = {}
-        number = (event.get("pull_request") or {}).get("number") or (
-            event.get("issue") or {}
-        ).get("number")
+        number = (event.get("pull_request") or {}).get("number") or (event.get("issue") or {}).get(
+            "number"
+        )
         if number:
             return PRRef(owner, name, int(number))
 
@@ -80,6 +80,7 @@ class GitHubPR:
         self._c = httpx.Client(
             base_url=API,
             timeout=timeout,
+            follow_redirects=True,  # renamed repos 301 from the old slug otherwise
             headers={
                 "Authorization": f"Bearer {token}",
                 "X-GitHub-Api-Version": "2022-11-28",
@@ -135,7 +136,6 @@ class GitHubPR:
                 break
             page += 1
         return seen
-
 
     def review_comments(self) -> list[dict]:
         """All inline review comments on the PR, paginated."""
@@ -243,18 +243,104 @@ class GitHubPR:
         r.raise_for_status()
 
 
-def render_comment(v: VerifiedFinding) -> str:
-    """One inline comment body, carrying its dedup marker."""
+def _normalise(text: str) -> str:
+    """Compare code by its content, not its indentation or inner spacing."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def resolve_anchor(
+    line: int,
+    quote: str,
+    commentable: set[int],
+    new_text: dict[int, str],
+) -> int | None:
+    """Return the line this finding should actually be anchored to, or None.
+
+    The model's line number is a guess; the quote is evidence. When they agree,
+    the anchor stands. When they disagree, the quote wins if it identifies one
+    line unambiguously — a model that miscounts by 30 lines still copies the text
+    it was looking at correctly.
+
+    None means "no trustworthy anchor": the caller demotes the finding to the
+    summary rather than pointing a suggestion at an unrelated line.
+    """
+    if not commentable:
+        return None
+    # No quote (a model that skipped the field, or a finding from an older run):
+    # fall back to trusting the number, which is the pre-quote behaviour.
+    quoted = [q for q in quote.splitlines() if q.strip()]
+    if not quoted:
+        return line if line in commentable else None
+
+    if _normalise(new_text.get(line, "")) == _normalise(quoted[0]):
+        return line
+
+    # Asked for one line, models often quote the whole cited span. That is still
+    # usable: the span is contiguous, so a unique match on its i-th line puts the
+    # span's first line i above it. Later lines are tried because the first is
+    # the one most often truncated mid-expression.
+    for i, q in enumerate(quoted):
+        target = _normalise(q)
+        matches = [n for n in sorted(commentable) if _normalise(new_text.get(n, "")) == target]
+        if len(matches) != 1:
+            continue
+        resolved = matches[0] - i
+        if resolved not in commentable:
+            resolved = matches[0]
+        log.info("re-anchored %s -> %s by quote", line, resolved)
+        return resolved
+
+    # No line of the quote matches exactly once. Either it was invented, or every
+    # line of it is something like a bare `}` — true of many lines, evidence for
+    # none of them.
+    log.info("no trustworthy anchor for line %s (quote matched nothing unique)", line)
+    return None
+
+
+# A suggestion block is committable with one click, so it must never contain
+# English. These are how an instruction-shaped "fix" actually opens.
+_PROSE_OPENER = re.compile(
+    r"^(check|use|consider|ensure|validate|replace|rename|add|remove|move|make|prefer|"
+    r"avoid|change|update|set|pass|call|wrap|extract|guard|handle|switch|swap)\b\s",
+    re.IGNORECASE,
+)
+
+
+def _is_committable(fix: str) -> bool:
+    """Is this a literal replacement for the anchored line, or a description of one?"""
+    s = fix.strip()
+    if not s:
+        return False
+    if "\n" in s:
+        return True
+    if _PROSE_OPENER.match(s):
+        return False
+    # Code lines end in punctuation or a bracket; sentences end in a full stop.
+    return not s.endswith(".")
+
+
+def render_comment(v: VerifiedFinding, *, verified: bool = False) -> str:
+    """One inline comment body, carrying its dedup marker.
+
+    `verified` says the anchor was confirmed against the quoted source text. It
+    defaults to False because a suggestion block replaces whatever line it lands
+    on: a caller that forgets to say should get the harmless rendering, not the
+    one that can rewrite an unrelated line.
+    """
     f = v.finding
     sev = v.final_severity
     emoji = SEVERITY_EMOJI.get(str(sev), "🔵")
     parts = [
         f"{emoji} **{sev.upper()}** · `{f.category}` · {f.confidence:.0%} confidence\n",
-        f"\n**{f.claim}**\n",
-        f"\n**How it breaks:** {f.failure_scenario}\n",
+        f"\n**{v.final_claim}**\n",
+        f"\n**How it breaks:** {v.final_failure_scenario}\n",
     ]
     if f.suggested_fix:
-        parts.append(f"\n```suggestion\n{f.suggested_fix}\n```\n")
+        if verified and _is_committable(f.suggested_fix):
+            parts.append(f"\n```suggestion\n{f.suggested_fix}\n```\n")
+        else:
+            # Still show it — just not as something one click will commit.
+            parts.append(f"\n**Suggested fix:** {f.suggested_fix}\n")
     parts.append(f"\n<!-- cr:{f.fingerprint()} -->")
     return "".join(parts)
 
@@ -263,6 +349,7 @@ def build_review(
     posted: list[VerifiedFinding],
     *,
     commentable: dict[str, set[int]],
+    new_text: dict[str, dict[int, str]] | None = None,
     already: set[str],
     tier: str,
     cost: float,
@@ -271,10 +358,13 @@ def build_review(
 ) -> tuple[str, list[dict[str, Any]]]:
     """Split findings into inline comments and a summary body.
 
-    Anything whose anchor is not a commentable line in this diff is demoted into
-    the summary rather than dropped — losing a real finding to an anchoring
-    technicality is the worst possible failure.
+    Anything without a trustworthy anchor in this diff is demoted into the
+    summary rather than dropped — losing a real finding to an anchoring
+    technicality is the worst possible failure. Pointing a one-click suggestion
+    at the wrong line is a close second, which is why the model's line number is
+    confirmed against the quoted text before anything is posted inline.
     """
+    new_text = new_text or {}
     comments: list[dict[str, Any]] = []
     demoted: list[VerifiedFinding] = []
     skipped = 0
@@ -285,9 +375,16 @@ def build_review(
             skipped += 1
             continue
         path, line = v.finding.anchor_file, v.finding.anchor_line
-        if line in commentable.get(path, set()):
+        quote = v.finding.evidence[0].quote
+        resolved = resolve_anchor(line, quote, commentable.get(path, set()), new_text.get(path, {}))
+        if resolved is not None:
             comments.append(
-                {"path": path, "line": line, "side": "RIGHT", "body": render_comment(v)}
+                {
+                    "path": path,
+                    "line": resolved,
+                    "side": "RIGHT",
+                    "body": render_comment(v, verified=bool(quote.strip())),
+                }
             )
         else:
             demoted.append(v)
@@ -306,11 +403,16 @@ def build_review(
     for v in demoted:
         f = v.finding
         emoji = SEVERITY_EMOJI.get(str(v.final_severity), "🔵")
+        # No line number here: these are demoted precisely because the cited one
+        # could not be confirmed, and printing it would lend it false authority.
+        quote = f.evidence[0].quote.strip()
+        where = f"`{f.anchor_file}`" + (f" — `{quote}`" if quote else "")
         lines.append(
-            f"\n### {emoji} `{f.anchor_file}:{f.anchor_line}` — {f.claim}\n"
-            f"\n{f.failure_scenario}\n"
-            f"\n<!-- cr:{f.fingerprint()} -->\n"
+            f"\n### {emoji} {where}\n\n**{v.final_claim}**\n\n{v.final_failure_scenario}\n"
         )
+        if f.suggested_fix:
+            lines.append(f"\n**Suggested fix:** {f.suggested_fix}\n")
+        lines.append(f"\n<!-- cr:{f.fingerprint()} -->\n")
 
     lines.append(
         f"\n<sub>tier `{tier}` · {killed} finding(s) killed by verification · "

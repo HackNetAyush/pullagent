@@ -76,6 +76,7 @@ def mine(
     with httpx.Client(
         base_url=API,
         timeout=timeout,
+        follow_redirects=True,  # renamed repos 301 from the old slug otherwise
         headers={
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",

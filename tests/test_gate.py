@@ -23,7 +23,9 @@ def _finding(
     return Finding(
         claim=claim,
         failure_scenario=scenario,
-        evidence=[Evidence(file=file, start_line=line, end_line=line + 2, why="the bound")],
+        evidence=[
+            Evidence(file=file, start_line=line, end_line=line + 2, quote="", why="the bound")
+        ],
         category=Category.CORRECTNESS,
         severity=severity,
         confidence=confidence,
@@ -46,6 +48,26 @@ def test_lockfile_only_change_is_free() -> None:
 def test_sensitive_path_forces_deep_tier_regardless_of_size() -> None:
     d = DiffSet(files=[FileDiff(path="src/auth/session.py", patch=_hunk_patch(1))])
     assert triage(d).tier == "T3"
+
+
+def test_concurrency_primitive_forces_deep_tier_regardless_of_path_or_size() -> None:
+    """T2 has no concurrency finder lens; a path like `flusher.py` never matches
+    the sensitive-path check, so this diff would otherwise miss T3's dedicated
+    lens for the exact process-lifecycle bugs multiprocessing code invites."""
+    patch = (
+        "@@ -1 +1,2 @@\n"
+        "+import multiprocessing\n"
+        "+p = multiprocessing.get_context('spawn').Process(target=run)\n"
+    )
+    d = DiffSet(files=[FileDiff(path="src/worker/flusher.py", patch=patch)])
+    r = triage(d)
+    assert r.tier == "T3"
+    assert "concurrency" in r.reason
+
+
+def test_plain_change_without_concurrency_primitives_still_routes_cheap() -> None:
+    d = DiffSet(files=[FileDiff(path="src/worker/flusher.py", patch=_hunk_patch(2))])
+    assert triage(d).tier == "T1"
 
 
 def test_small_change_routes_cheap() -> None:

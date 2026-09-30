@@ -9,6 +9,13 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.cache/
 uv.lock
 evals/fixtures/*.json
 !evals/fixtures/.gitkeep
+
+# GitHub App credentials, if anyone points CR_APP_CREDENTIALS_PATH at the repo.
+github-app.json
+*.private-key.pem
+HANDOFF.md
+scripts/*results.jsonl

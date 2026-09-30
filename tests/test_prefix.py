@@ -142,7 +142,7 @@ def test_verifier_shares_the_finder_cache_prefix() -> None:
     finding = Finding(
         claim="x",
         failure_scenario="a concrete scenario long enough to pass prefilter",
-        evidence=[Evidence(file="a.py", start_line=1, end_line=2, why="w")],
+        evidence=[Evidence(file="a.py", start_line=1, end_line=2, quote="", why="w")],
         category=Category.CORRECTNESS,
         severity=Severity.HIGH,
         confidence=0.9,

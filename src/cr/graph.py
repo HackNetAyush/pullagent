@@ -123,8 +123,20 @@ REF_QUERIES["cpp"] = REF_QUERIES["c"]
 REF_QUERIES["php"] = "(function_call_expression function: (name) @ref)"
 
 SKIP_DIRS = {
-    ".git", "node_modules", "vendor", "dist", "build", "target", ".venv", "venv",
-    "__pycache__", ".next", ".nuxt", "coverage", ".mypy_cache", ".pytest_cache",
+    ".git",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".nuxt",
+    "coverage",
+    ".mypy_cache",
+    ".pytest_cache",
 }
 MAX_FILE_BYTES = 400_000
 SCHEMA = 1
@@ -315,7 +327,7 @@ def render_slice(
     co_changed: list[tuple[str, int]],
     *,
     root: Path | None = None,
-    max_chars: int = 9_000,
+    max_chars: int = 20_000,
 ) -> str:
     """The context block: who calls what changed, plus historical coupling.
 
@@ -323,14 +335,13 @@ def render_slice(
     a diff and the three callers it will break".
     """
     changed_syms = graph.definitions_in(changed)
-    callers = graph.callers_of(changed_syms, exclude=changed)
+    callers = sorted(graph.callers_of(changed_syms, exclude=changed))
 
     parts: list[str] = []
 
     if changed_syms:
         parts.append(
-            "Symbols defined in the changed files: "
-            + ", ".join(sorted(changed_syms)[:40])
+            "Symbols defined in the changed files: " + ", ".join(sorted(changed_syms)[:40])
         )
 
     if callers:
@@ -342,19 +353,37 @@ def render_slice(
             parts.append(f"  {name} <- {', '.join(locs[:6])}")
 
         if root is not None:
-            parts.append("\nCalling lines:")
+            parts.append("\nCaller code (line-numbered at the reviewed commit):")
             shown = 0
             for _name, f, line in callers:
                 if shown >= 12:
                     break
-                snippet = _line_at(root / f, line)
+                snippet = _snippet(root, f, line, radius=16)
                 if snippet:
-                    parts.append(f"  {f}:{line}  {snippet}")
+                    parts.append(snippet)
                     shown += 1
+
+    if root is not None:
+        # Callers alone cannot establish what a changed call returns. Include callees too.
+        referenced = sorted(
+            name for name, refs in graph.refs.items() if any(f in changed for f, _line in refs)
+        )
+        locations = sorted(
+            {
+                (f, line)
+                for name in referenced
+                for f, line in graph.defs.get(name, [])
+                if f not in changed
+            }
+        )
+        if locations:
+            parts.append("\nDefinitions used by the changed code:")
+            for f, line in locations[:12]:
+                parts.append(_snippet(root, f, line, radius=20))
 
     if co_changed:
         parts.append(
-            "\nFiles that historically change together with these (last 6 months):\n  "
+            "\nFiles that historically change together (up to 2,000 reviewed-commit ancestors):\n  "
             + ", ".join(f"{f} ({n}x)" for f, n in co_changed[:10])
         )
 
@@ -371,3 +400,15 @@ def _line_at(path: Path, line: int) -> str:
     except OSError:
         return ""
     return ""
+
+
+def _snippet(root: Path, file: str, line: int, radius: int) -> str:
+    path = (root / file).resolve()
+    if not path.is_relative_to(root.resolve()):
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        start, end = max(1, line - radius), min(len(lines), line + radius)
+        return f"\n### {file}\n" + "\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1))
+    except OSError:
+        return ""

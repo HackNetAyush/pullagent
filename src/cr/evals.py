@@ -23,7 +23,6 @@ from pathlib import Path
 from cr.config import TIERS, Settings, TierConfig
 from cr.diff import DiffSet, parse
 from cr.github import GitHubPR, PRRef
-from cr.llm.client import RATES
 from cr.llm.prefix import PRContext, RepoContext
 from cr.models import ReviewResult
 from cr.review.engine import review as run_review
@@ -98,7 +97,7 @@ def score_run(fixture: Fixture, result: ReviewResult) -> RunScore:
             f = vf.finding
             if exp.file and exp.file not in f.anchor_file:
                 continue
-            blob = f"{f.claim} {f.failure_scenario} {f.suggested_fix or ''}".lower()
+            blob = f"{vf.final_claim} {vf.final_failure_scenario} {f.suggested_fix or ''}".lower()
             if sum(1 for n in needles if n in blob) >= exp.min_matches:
                 s.found.add(exp.id)
                 # Mark every match, not just the first. Two findings describing
@@ -108,7 +107,7 @@ def score_run(fixture: Fixture, result: ReviewResult) -> RunScore:
 
     for i, vf in enumerate(result.posted):
         if i not in matched_findings:
-            s.extra.append(vf.finding.claim[:90])
+            s.extra.append(vf.final_claim[:90])
 
     u = result.usage
     s.cache_ratio = u.cache_hit_ratio
@@ -165,7 +164,7 @@ def evaluate(
         log.info("run %d/%d", i + 1, runs)
         result = asyncio.run(_one_run(fixture, tier, settings, use_graph=use_graph))
         s = score_run(fixture, result)
-        s.cost = result.usage.cost_usd(*RATES.get(tier.model, (3.0, 15.0)))
+        s.cost = result.cost_usd
         scores.append(s)
     return scores
 

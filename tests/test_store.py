@@ -22,7 +22,7 @@ def _vf(claim: str = "off-by-one", line: int = 10) -> VerifiedFinding:
         finding=Finding(
             claim=claim,
             failure_scenario="An empty list makes the index wrap to the last element.",
-            evidence=[Evidence(file="a.py", start_line=line, end_line=line, why="bound")],
+            evidence=[Evidence(file="a.py", start_line=line, end_line=line, quote="", why="bound")],
             category=Category.CORRECTNESS,
             severity=Severity.HIGH,
             confidence=0.9,
@@ -121,3 +121,24 @@ def test_actor_column_exists_for_auth(url) -> None:
     rid = store.start_run("acme/api", tier="T1", model="m", actor="user:42", url=url)
     with store.session(url) as s:
         assert s.get(Run, rid).actor == "user:42"
+
+
+def test_cache_hit_replay_records_the_original_cost(url) -> None:
+    """A cache-hit review legitimately costs $0 / 0 tokens. Without recording
+    cache_hit and cached_cost_usd the ledger cannot tell that apart from a
+    review that simply found nothing — both would render identically."""
+    from cr.models import ReviewResult, Usage
+    from cr.store.models import Run
+
+    rid = store.start_run("acme/api", tier="T2", model="m", url=url)
+    store.finish_run(
+        rid,
+        ReviewResult(tier="T2", usage=Usage(), cache_hit=True, cached_cost_usd=0.93),
+        cost=0.0,
+        url=url,
+    )
+    with store.session(url) as s:
+        run = s.get(Run, rid)
+        assert run.cache_hit is True
+        assert run.cached_cost_usd == pytest.approx(0.93)
+        assert run.cost_usd == 0.0

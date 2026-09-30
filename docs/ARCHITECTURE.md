@@ -188,8 +188,8 @@ Route on **hunk count × file count × blast radius** (PR-Agent's approach — t
 |---|---|---|---|---|---|
 | **T0 — skip** | Lockfiles, generated files, pure renames, `.md`-only, vendored dirs | *none* | — | 0 / 0 | **$0.00** |
 | **T1 — light** | ≤ 8 hunks, ≤ 3 files, no security-sensitive path | Haiku 4.5 finder → Sonnet 5 verifier | low | 1 / 1 | ~$0.02 |
-| **T2 — standard** | The 80% case | Sonnet 5 finder fan-out → Sonnet 5 verifier | high | 3 / 4 | ~$0.23 |
-| **T3 — deep** | Touches auth / payments / migrations / concurrency, or > 40 hunks | Sonnet 5 finders → **Opus 5** verifier + synthesis | xhigh | 6 / 8 | ~$0.50 |
+| **T2 — standard** | The 80% case | Sonnet 5 finder fan-out → Sonnet 5 verifier | medium | 3 / 4 | ~$0.23 (measured: $0.93 on a dense real PR, down from $1.57 at `high`) |
+| **T3 — deep** | Touches auth / payments / migrations / concurrency, or > 40 hunks | Sonnet 5 finders → **Opus 5** verifier + synthesis | high | 6 / 8 | ~$0.50 (was `xhigh`; lowered on the same reasoning as T2, not yet validated at T3) |
 
 > Costs are computed in `PIPELINE.md` §2.1 with prompt caching applied. Note that **once
 > caching is on, output tokens dominate** — input drops ~82% while output does not, so the
@@ -224,9 +224,11 @@ Ranked for *this* workload:
 
 ### 3.4 Effort tuning (non-obvious, costs real money if wrong)
 
-- Default to `high`; use `xhigh` only for T3. `max` overthinks and shows diminishing returns.
-- `low` and `medium` are unusually strong on the current generation — sweep them on your own
-  eval set before assuming you need `high` everywhere. Cheapest optimisation available.
+- `max` overthinks and shows diminishing returns. `xhigh` was tried for T3 and dropped — no
+  tier uses it now (see below).
+- `low` and `medium` are unusually strong on the current generation — this used to be a
+  hypothesis, now it's measured: T2 at `medium` cost 41% less and had *better* recall than
+  `high` on the same real PR. Sweep before assuming a tier needs more than `medium`.
 - **Do not lower effort to shorten comments** — it does not reliably work. Control verbosity
   with an explicit conciseness instruction in the prompt instead.
 - **Delete any "double-check your work / verify before responding" instruction.** Current

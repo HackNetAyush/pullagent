@@ -22,15 +22,24 @@ index 1111111..2222222 100644
 """
 
 
-def _vf(file: str = "app/handler.py", line: int = 13, claim: str = "off-by-one") -> VerifiedFinding:
+def _vf(
+    file: str = "app/handler.py",
+    line: int = 13,
+    claim: str = "off-by-one",
+    quote: str = "",
+    fix: str | None = None,
+) -> VerifiedFinding:
     return VerifiedFinding(
         finding=Finding(
             claim=claim,
             failure_scenario="With an empty list the index wraps and returns the last element.",
-            evidence=[Evidence(file=file, start_line=line, end_line=line, why="the bound")],
+            evidence=[
+                Evidence(file=file, start_line=line, end_line=line, quote=quote, why="the bound")
+            ],
             category=Category.CORRECTNESS,
             severity=Severity.HIGH,
             confidence=0.9,
+            suggested_fix=fix,
         ),
         verdicts=[Verdict(refuted=False, reasoning="confirmed")],
     )
@@ -81,8 +90,11 @@ def test_finding_off_the_diff_is_demoted_not_dropped() -> None:
         killed=0,
     )
     assert comments == []
-    assert "app/handler.py:999" in body
+    assert "app/handler.py" in body
     assert "off-by-one" in body
+    # The line it cited is the reason it was demoted; repeating it in the summary
+    # would present an unconfirmed number as a location.
+    assert "999" not in body
 
 
 def test_already_posted_findings_are_skipped() -> None:
@@ -112,9 +124,97 @@ def test_comment_carries_a_recoverable_fingerprint_marker() -> None:
 
 
 def test_suggested_fix_renders_as_a_github_suggestion_block() -> None:
-    vf = _vf()
+    vf = _vf(quote="    added_one()")
     vf.finding.suggested_fix = "    return items[len(items) - 1]"
-    assert "```suggestion" in render_comment(vf)
+    assert "```suggestion" in render_comment(vf, verified=True)
+
+
+def test_prose_fix_never_becomes_a_committable_suggestion() -> None:
+    """A suggestion block is one click from being committed, so English in one
+    puts prose into the source file."""
+    vf = _vf(quote="    added_one()")
+    vf.finding.suggested_fix = "check trimmed.length <= MAX_MESSAGE_LENGTH"
+    rendered = render_comment(vf, verified=True)
+    assert "```suggestion" not in rendered
+    # The advice still reaches the reader; it just is not committable.
+    assert "MAX_MESSAGE_LENGTH" in rendered
+
+
+def test_unconfirmed_anchor_gets_no_suggestion_block() -> None:
+    """Without a quote the line number is unverified, and a suggestion replaces
+    whatever line it lands on."""
+    vf = _vf(quote="")
+    vf.finding.suggested_fix = "    return items[len(items) - 1]"
+    assert "```suggestion" not in render_comment(vf)
+
+
+def test_quote_relocates_a_miscounted_anchor() -> None:
+    """The failure this exists for: the model cites real code but the wrong
+    number. The quote identifies the line it was actually looking at."""
+    files = parse(SAMPLE_DIFF)
+    commentable = {f.path: f.commentable for f in files}
+    new_text = {f.path: f.new_text for f in files}
+    _, comments = build_review(
+        [_vf(line=11, quote="    added_two()")],
+        commentable=commentable,
+        new_text=new_text,
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert len(comments) == 1
+    assert comments[0]["line"] == 14  # where added_two() actually is, not 11
+
+
+def test_invented_quote_loses_its_anchor() -> None:
+    """A quote matching nothing in the diff means the citation is fabricated."""
+    files = parse(SAMPLE_DIFF)
+    _, comments = build_review(
+        [_vf(line=13, quote="    never_written_anywhere()")],
+        commentable={f.path: f.commentable for f in files},
+        new_text={f.path: f.new_text for f in files},
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert comments == []
+
+
+def test_ambiguous_quote_loses_its_anchor() -> None:
+    """A quote true of many lines is evidence for none of them."""
+    diff = SAMPLE_DIFF.replace("+    added_two()", "+    added_one()")
+    files = parse(diff)
+    _, comments = build_review(
+        [_vf(line=99, quote="    added_one()")],
+        commentable={f.path: f.commentable for f in files},
+        new_text={f.path: f.new_text for f in files},
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert comments == []
+
+
+def test_matching_quote_is_left_where_it_is() -> None:
+    files = parse(SAMPLE_DIFF)
+    _, comments = build_review(
+        [_vf(line=13, quote="    added_one()")],
+        commentable={f.path: f.commentable for f in files},
+        new_text={f.path: f.new_text for f in files},
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert len(comments) == 1
+    assert comments[0]["line"] == 13
 
 
 def test_clean_review_still_posts_a_summary() -> None:
@@ -123,3 +223,39 @@ def test_clean_review_still_posts_a_summary() -> None:
     )
     assert comments == []
     assert "No findings survived verification" in body
+
+
+def test_span_quote_resolves_to_the_span_start() -> None:
+    """Asked for one line, models often quote the whole cited span. The span is
+    contiguous, so a match on its i-th line puts the start i lines above."""
+    files = parse(SAMPLE_DIFF)
+    _, comments = build_review(
+        [_vf(line=99, quote="    added_one()\n    added_two()")],
+        commentable={f.path: f.commentable for f in files},
+        new_text={f.path: f.new_text for f in files},
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert len(comments) == 1
+    assert comments[0]["line"] == 13
+
+
+def test_span_quote_survives_a_truncated_first_line() -> None:
+    """The first quoted line is the one most often cut off mid-expression, so a
+    later line has to be able to carry the anchor."""
+    files = parse(SAMPLE_DIFF)
+    _, comments = build_review(
+        [_vf(line=99, quote="    added_o\n    added_two()")],
+        commentable={f.path: f.commentable for f in files},
+        new_text={f.path: f.new_text for f in files},
+        already=set(),
+        tier="T2",
+        cost=0.1,
+        elapsed=1.0,
+        killed=0,
+    )
+    assert len(comments) == 1
+    assert comments[0]["line"] == 13  # 14 matched at offset 1

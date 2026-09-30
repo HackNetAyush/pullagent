@@ -40,13 +40,17 @@ def _is_sensitive(path: str, patterns: tuple[str, ...]) -> bool:
     return any(pat in p for pat in patterns)
 
 
+def _mentions_concurrency(patch: str, patterns: tuple[str, ...]) -> bool:
+    return any(pat in patch for pat in patterns)
+
+
 def triage(diff: DiffSet, cfg: Settings | None = None) -> TriageResult:
     s = cfg or default_settings
 
     reviewable: list[FileDiff] = []
     skipped: list[FileDiff] = []
     for f in diff.files:
-        if _is_skippable(f.path, s.skip_patterns) or f.is_deleted:
+        if _is_skippable(f.path, s.skip_patterns):
             skipped.append(f)
         else:
             reviewable.append(f)
@@ -55,7 +59,7 @@ def triage(diff: DiffSet, cfg: Settings | None = None) -> TriageResult:
         return TriageResult(
             tier="T0",
             config=None,
-            reason="no reviewable files (lockfiles, generated, vendored, or deletions only)",
+            reason="no reviewable files (lockfiles, generated, or vendored)",
             reviewable=[],
             skipped=skipped,
         )
@@ -69,6 +73,19 @@ def triage(diff: DiffSet, cfg: Settings | None = None) -> TriageResult:
             tier="T3",
             config=TIERS["T3"],
             reason=f"touches sensitive path(s): {', '.join(sorted(sensitive)[:3])}",
+            reviewable=reviewable,
+            skipped=skipped,
+        )
+
+    concurrent_files = [
+        f.path for f in reviewable if _mentions_concurrency(f.patch, s.concurrency_patterns)
+    ]
+
+    if concurrent_files:
+        return TriageResult(
+            tier="T3",
+            config=TIERS["T3"],
+            reason=f"touches concurrency primitives: {', '.join(sorted(concurrent_files)[:3])}",
             reviewable=reviewable,
             skipped=skipped,
         )

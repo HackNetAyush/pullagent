@@ -8,9 +8,79 @@
   --font-display: "Manrope", "DM Sans", sans-serif;
   --color-brand-50: #f0f0ff;
   --color-brand-100: #e4e4ff;
+  --color-brand-200: #cfcff8;
   --color-brand-500: #6464dc;
   --color-brand-600: #5555c8;
   --color-brand-700: #4545ad;
+}
+
+/* ---------------------------------------------------------------------------
+   Chart palette.
+   Every value below is validated, not chosen by eye — `validate_palette.js`
+   was run against the exact surfaces these render on (#ffffff cards in light,
+   #151b28 in dark) and each set passes the lightness band, chroma floor,
+   CVD separation, normal-vision floor and contrast checks.
+
+   These tokens previously did not exist at all: `api.ts` referenced --ord-1
+   and --series-1, nothing defined them, and every severity and status colour
+   silently resolved to nothing.
+   --------------------------------------------------------------------------- */
+:root {
+  --surface: #ffffff;
+  --plane: #f6f7fb;
+
+  /* Categorical — fixed order, never cycled. Slots 3 and 4 sit below 3:1 on
+     white, so any chart using them ships direct labels or the table view. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+
+  /* Severity is an ordered scale, not four identities: one hue, dark = worse.
+     Validated with --ordinal; the light end clears 2:1 against the surface. */
+  --sev-critical: #184f95;
+  --sev-high: #2a78d6;
+  --sev-medium: #5598e7;
+  --sev-low: #86b6ef;
+
+  /* Reserved status palette — never reused as a series colour, and always
+     shipped beside an icon or a text label so hue is never load-bearing. */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+
+  --grid: #e9ecf3;
+  --axis: #8a93a6;
+}
+
+:root[data-theme="dark"] {
+  --surface: #151b28;
+  --plane: #0d111b;
+
+  /* Not an automatic flip: the same six hues re-stepped for the dark surface
+     and validated as a set against #151b28. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+
+  --sev-critical: #b7d3f6;
+  --sev-high: #6da7ec;
+  --sev-medium: #3987e5;
+  --sev-low: #184f95;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+
+  --grid: #232c3e;
+  --axis: #6b7689;
 }
 
 @layer base {
@@ -21,17 +91,20 @@
     min-width: 320px;
     min-height: 100vh;
     overflow-x: hidden;
-    background: #f6f7fb;
+    background: var(--plane);
     color: #172033;
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
-    transition: background-color .3s ease, color .3s ease;
   }
-  [data-theme="dark"] body { background: #0d111b; color: #f1f4f9; }
+  [data-theme="dark"] body { color: #e8ecf4; }
   button { cursor: pointer; }
   button:disabled { cursor: default; }
-  [class*="dark:bg-"], [class*="dark:border-"], [class*="dark:text-"] {
-    transition: background-color .3s ease, border-color .3s ease, color .3s ease;
+
+  /* Focus is never removed, only restyled — keyboard users need to see it. */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 }
 
@@ -40,15 +113,18 @@
   to { background-position: -100% 0; }
 }
 
-@keyframes drawer-in {
-  from { opacity: .55; transform: translateX(42px); }
-}
-
-@keyframes loading-bar {
-  0% { transform: translateX(-110%); }
-  100% { transform: translateX(310%); }
-}
-
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(4px); }
 }
+
+.animate-fade-up { animation: fade-up .22s ease-out both; }
+
+.skeleton {
+  background: linear-gradient(90deg, var(--grid) 25%, var(--surface) 50%, var(--grid) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* Recharts draws its own focus ring on every segment; ours is enough. */
+.recharts-wrapper:focus,
+.recharts-surface:focus { outline: none; }

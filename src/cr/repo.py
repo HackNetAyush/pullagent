@@ -128,9 +128,9 @@ class RepoCache:
         slug: str,
         paths: set[str],
         *,
-        months: int = 6,
         top: int = 12,
         min_count: int = 2,
+        ref: str = "HEAD",
     ) -> list[tuple[str, int]]:
         """Files that historically change in the same commit as `paths`.
 
@@ -140,7 +140,7 @@ class RepoCache:
             return []
         try:
             out = _run(
-                ["git", "log", f"--since={months}.months", "--name-only", "--pretty=format:%H"],
+                ["git", "log", ref, "-n", "2000", "--name-only", "--pretty=format:%H"],
                 cwd=self.mirror_path(slug),
                 timeout=180,
             )

@@ -99,7 +99,7 @@ def context_for_pr(
     """
     try:
         cache = RepoCache(cache_root or default_cache_dir())
-        cache.ensure(slug, token)
+        cache.ensure(slug, token, fetch=False)
 
         # PR head commits live under refs/pull/N/head until the PR merges.
         if not cache.has_commit(slug, head_sha):
@@ -107,7 +107,7 @@ def context_for_pr(
 
         index_sha = base_sha if cache.has_commit(slug, base_sha) else head_sha
         path = g.cache_path(cache.root, slug, index_sha)
-        graph = g.load(path)
+        graph = g.load(g.cache_path(cache.root, slug, head_sha)) or g.load(path)
 
         if graph is None:
             latest = g.latest_cached(cache.root, slug)
@@ -123,15 +123,30 @@ def context_for_pr(
                     graph = g.build(tree, commit=index_sha)
                 g.save(graph, path)
 
-        co = cache.co_change(slug, changed)
+        # Historical evaluation must never select context using future commits.
+        co = cache.co_change(slug, changed, ref=head_sha)
 
         with cache.worktree(slug, head_sha) as tree:
             # Base-graph + delta (PIPELINE.md 3.2). The PR's files may not exist
             # at the base commit at all, so re-index them from head and merge.
             # Without this, a PR that adds files has no symbols and the slice is
             # empty — which is the whole feature silently doing nothing.
-            graph.drop_files(changed)
-            g.index_files(tree, [tree / c for c in changed if (tree / c).is_file()], graph)
+            from cr.repo import _run
+
+            # A reused index may be much older (or newer) than this PR's base.
+            # Repair *every* changed file between the index and head, not just PR files.
+            delta = set(changed)
+            if graph.commit and graph.commit != head_sha:
+                delta.update(
+                    _run(
+                        ["git", "diff", "--name-only", graph.commit, head_sha],
+                        cwd=cache.mirror_path(slug),
+                    ).splitlines()
+                )
+            graph.drop_files(delta)
+            g.index_files(tree, [tree / c for c in sorted(delta) if (tree / c).is_file()], graph)
+            graph.commit = head_sha
+            g.save(graph, g.cache_path(cache.root, slug, head_sha))
             return g.render_slice(graph, changed, co, root=tree)
     except Exception as e:  # noqa: BLE001 - context is an enhancement, never a hard dependency
         log.warning("graph context unavailable: %s", e)
