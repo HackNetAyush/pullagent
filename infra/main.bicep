@@ -16,6 +16,12 @@ param name string = 'crreview'
 
 param location string = resourceGroup().location
 
+@description('PostgreSQL region. Can differ when this subscription restricts database provisioning in the app region.')
+param pgLocation string = location
+
+@description('Public HTTPS origin of the web app. Set after the first deployment returns the ingress FQDN.')
+param publicUrl string = ''
+
 @description('Container image, e.g. myacr.azurecr.io/cr:abc1234. Set by CI.')
 param image string
 
@@ -156,7 +162,7 @@ resource sbSend 'Microsoft.ServiceBus/namespaces/AuthorizationRules@2022-10-01-p
 
 resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview' = {
   name: '${name}-pg'
-  location: location
+  location: pgLocation
   tags: tags
   sku: {
     // Burstable: the store sees a handful of queries per review, not a load.
@@ -305,7 +311,10 @@ resource web 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'web'
           image: image
           command: ['cr']
-          args: ['app', 'serve', '--host', '0.0.0.0', '--port', '8000', '--role', 'web']
+          args: concat(
+            ['app', 'serve', '--host', '0.0.0.0', '--port', '8000', '--role', 'web'],
+            empty(publicUrl) ? [] : ['--public-url', publicUrl]
+          )
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(sharedEnv, [{ name: 'CR_APP_ROLE', value: 'web' }])
           volumeMounts: cacheMount

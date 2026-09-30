@@ -43,55 +43,67 @@ The review cache is content-addressed files on the share; the token cache is
 per-process and an hour long. Add Redis when the worker count makes repeated
 Postgres reads show up in a trace, not before.
 
+**Baseline cost is not zero.** The web Container App stays at one replica so
+GitHub webhooks get a prompt response, and the Basic registry plus the small
+PostgreSQL server run continuously. The worker scales to zero. Azure Files is
+billed for used storage and transactions. Model calls are an additional
+per-review cost. Check the Azure pricing calculator for the chosen region and
+set a subscription budget before inviting other accounts.
+
 ---
 
 ## Deploy it
 
-### 1. Federate GitHub Actions to Azure
+### 1. Apply the infrastructure once with an Azure administrator
 
-Create an app registration with a federated credential for this repository, and
-give it Contributor on the resource group. Then set, as **repository secrets**:
+Create a resource group and Basic ACR first, build the dashboard and image,
+then apply `infra/main.bicep` with a local, ignored parameters JSON file. The
+template creates PostgreSQL, Service Bus, Azure Files, the Container Apps, and
+their managed identity. The parameter file must supply the image, database
+password, GitHub App credentials, Foundry key and resource name, and admin
+login. Keep that file out of Git. The Container Apps hold their own secrets.
+After the first apply returns the web ingress FQDN, set `publicUrl` to its
+`https://` origin and reapply so GitHub OAuth redirects to the live site.
+
+### 2. Federate GitHub Actions with narrow permissions
+
+Create an Entra app with a federated credential whose subject is
+`repo:OWNER/REPO:environment:production`. Give its service principal `AcrPush`
+on the registry and `Container Apps Contributor` on **each of the two Container
+Apps only**. It does not need Contributor on the resource group. Set these
+**repository secrets**:
 
 | Secret | What it is |
 | --- | --- |
-| `AZURE_CLIENT_ID` | the app registration |
+| `AZURE_CLIENT_ID` | the Entra app registration |
 | `AZURE_TENANT_ID` | your tenant |
 | `AZURE_SUBSCRIPTION_ID` | the subscription |
-| `PG_PASSWORD` | a password you generate for Postgres |
-| `GH_APP_PRIVATE_KEY` | the App's PEM, pasted whole |
-| `GH_WEBHOOK_SECRET` | the App's webhook secret |
-| `GH_CLIENT_SECRET` | the App's OAuth client secret |
-| `CR_AZURE_API_KEY` | your Foundry key |
 
-and as **repository variables**:
+Set these **repository variables**:
 
 | Variable | Example |
 | --- | --- |
-| `AZURE_RESOURCE_GROUP` | `cr-prod` |
-| `ACR_NAME` | `crreviewacr` |
-| `APP_NAME` | `crreview` |
-| `GH_APP_ID` | `5130744` |
-| `GH_CLIENT_ID` | `Iv23li...` |
-| `CR_AZURE_RESOURCE` | `foundaryres03` |
-| `CR_ADMIN_LOGINS` | `HackNetAyush` |
+| `AZURE_RESOURCE_GROUP` | `pullagent-prod-eastus` |
+| `ACR_NAME` | `crpa8b0eacr` |
+| `APP_NAME` | `crpa8b0e` |
 
-Secrets and variables may not begin with `GITHUB_` — Actions reserves that
-prefix, which is why the App id is `GH_APP_ID` here and `CR_GITHUB_APP_ID`
-inside the container.
+GitHub Actions never receives the App private key, webhook secret, database
+password, or model key.
 
-### 2. Push to `main`
+### 3. Push to `main`
 
-`.github/workflows/deploy.yml` builds the image in ACR, applies
-`infra/main.bicep`, and polls `/api/health` until the new revision answers. The
-job summary prints the webhook URL.
+`.github/workflows/deploy.yml` builds and pushes the image, updates the worker
+and web Container Apps, and checks `/api/health`. Infrastructure changes are
+applied with Bicep under an Azure administrator login. The job summary prints
+the webhook URL.
 
-### 3. Point the App at it
+### 4. Point the App at it
 
 In the App's settings, set the webhook URL to the address from the summary
 (`https://<fqdn>/webhook`) and the callback URL to `https://<fqdn>/auth/callback`.
 The smee relay is no longer involved.
 
-### 4. Make yourself an administrator, then approve yourself
+### 5. Make yourself an administrator, then approve yourself
 
 `CR_ADMIN_LOGINS` promotes you on your **first sign-in**, so visit the
 dashboard and sign in before anything else. Then:
@@ -153,6 +165,8 @@ read, which is the trade for not holding a timer in a process that may vanish.
 VNet integration is the upgrade when that stops being acceptable; it is a
 change to `infra/main.bicep` and nothing else.
 
-**The Bicep template has never been applied.** It compiles in CI (`az bicep
-build`) and the resource shapes follow current API versions, but no one has run
-it against a live subscription yet. Expect to fix something the first time.
+**The app and database can be in different Azure regions.** The `pgLocation`
+parameter exists because this subscription permits the B1ms database in
+Central US but restricts it in East US. This adds some database latency and
+small cross-region transfer charges. Keep both in one region when the
+subscription allows it.

@@ -19,3 +19,4 @@ github-app.json
 *.private-key.pem
 HANDOFF.md
 scripts/*results.jsonl
+azure-build-context/

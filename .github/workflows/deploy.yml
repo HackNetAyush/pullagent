@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   build:
+    if: vars.ACR_NAME != '' && vars.APP_NAME != '' && vars.AZURE_RESOURCE_GROUP != ''
     runs-on: ubuntu-latest
     environment: production
     outputs:
@@ -82,10 +83,9 @@ jobs:
       - name: Build and push
         if: steps.exists.outputs.found == 'false'
         run: |
-          az acr build \
-            --registry "$ACR_NAME" \
-            --image "cr:${{ steps.meta.outputs.tag }}" \
-            --file Dockerfile .
+          az acr login --name "$ACR_NAME"
+          docker build --file Dockerfile --tag "${{ steps.meta.outputs.image }}" .
+          docker push "${{ steps.meta.outputs.image }}"
 
   deploy:
     needs: build
@@ -100,56 +100,23 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Bicep is the source of truth for everything except the image tag, so a
-      # deploy is a full template apply rather than a container-image poke. That
-      # is what stops the template and reality drifting until the next apply
-      # surprises someone.
-      - name: Apply infrastructure
-        env:
-          DEPLOY_IMAGE: ${{ needs.build.outputs.image }}
-          PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
-          GH_APP_ID: ${{ vars.GH_APP_ID }}
-          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
-          GH_CLIENT_ID: ${{ vars.GH_CLIENT_ID }}
-          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
-          CR_AZURE_API_KEY: ${{ secrets.CR_AZURE_API_KEY }}
-          CR_AZURE_RESOURCE: ${{ vars.CR_AZURE_RESOURCE }}
-          CR_ADMIN_LOGINS: ${{ vars.CR_ADMIN_LOGINS }}
+      # The deployment identity can push to ACR and update these two apps only.
+      # Infrastructure and secrets are applied separately with infra/main.bicep
+      # by an Azure administrator; CI never receives the GitHub App private key.
+      - name: Update the two Container Apps
         run: |
           set -euo pipefail
-          umask 077
-          PARAM_FILE="$(mktemp "${RUNNER_TEMP}/cr-parameters.XXXXXX.json")"
-          trap 'rm -f "$PARAM_FILE"' EXIT
-          python - "$PARAM_FILE" <<'PY'
-          import json, os, sys
-
-          names = {
-              "name": "APP_NAME",
-              "image": "DEPLOY_IMAGE",
-              "pgPassword": "PG_PASSWORD",
-              "githubAppId": "GH_APP_ID",
-              "githubAppPrivateKey": "GH_APP_PRIVATE_KEY",
-              "githubWebhookSecret": "GH_WEBHOOK_SECRET",
-              "githubClientId": "GH_CLIENT_ID",
-              "githubClientSecret": "GH_CLIENT_SECRET",
-              "azureApiKey": "CR_AZURE_API_KEY",
-              "azureResource": "CR_AZURE_RESOURCE",
-              "adminLogins": "CR_ADMIN_LOGINS",
-          }
-          params = {key: {"value": os.environ[value]} for key, value in names.items()}
-          with open(sys.argv[1], "w", encoding="utf-8") as stream:
-              json.dump({"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#", "contentVersion": "1.0.0.0", "parameters": params}, stream)
-          PY
-          az deployment group create \
-            --resource-group "$RESOURCE_GROUP" \
-            --template-file infra/main.bicep \
-            --parameters @"$PARAM_FILE" \
-            --query 'properties.outputs' -o json > outputs.json
+          az extension add --name containerapp --upgrade --yes
+          az containerapp update --resource-group "$RESOURCE_GROUP" \
+            --name "$APP_NAME-worker" --image "${{ needs.build.outputs.image }}" --output none
+          az containerapp update --resource-group "$RESOURCE_GROUP" \
+            --name "$APP_NAME-web" --image "${{ needs.build.outputs.image }}" --output none
 
       - name: Wait for the ingress to answer
         run: |
-          URL=$(jq -r '.webUrl.value' outputs.json)
+          FQDN=$(az containerapp show -g "$RESOURCE_GROUP" -n "$APP_NAME-web" \
+            --query 'properties.configuration.ingress.fqdn' -o tsv)
+          URL="https://$FQDN"
           echo "Deployed: $URL"
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/health" || true)
@@ -171,7 +138,7 @@ jobs:
             echo "### CR deployment"
             echo ""
             echo "- image: \`${{ needs.build.outputs.image }}\`"
-            echo "- webhook: \`$(jq -r '.webhookUrl.value' outputs.json 2>/dev/null)\`"
+            echo "- webhook: \`https://$(az containerapp show -g "$RESOURCE_GROUP" -n "$APP_NAME-web" --query 'properties.configuration.ingress.fqdn' -o tsv 2>/dev/null)/webhook\`"
             echo ""
             echo "Point the GitHub App's webhook URL at that address if it changed."
           } >> "$GITHUB_STEP_SUMMARY"
