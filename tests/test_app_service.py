@@ -577,7 +577,7 @@ def test_our_own_reply_does_not_trigger_another(client, github, our_thread, repl
 # --- commands ----------------------------------------------------------------
 
 
-def _command_event(body="@cr review", comment_id=11):
+def _command_event(body="@pullagent review", comment_id=11):
     return {
         "action": "created",
         "repository": {"full_name": "me/repo"},
@@ -596,14 +596,14 @@ def test_review_command_queues_a_full_review(client, github, no_local_context, r
 
 
 def test_help_command_answers_without_reviewing(client, github, no_local_context, review_result):
-    post_hook(client, "issue_comment", _command_event(body="@cr help"))
+    post_hook(client, "issue_comment", _command_event(body="@pullagent help"))
     drain(client)
     assert github.submitted == []
-    assert any("@cr review" in c["body"] for c in github.issue_comment_list)
+    assert any("@pullagent review" in c["body"] for c in github.issue_comment_list)
 
 
 def test_ignore_command_suppresses_by_fingerprint(client, github, no_local_context):
-    post_hook(client, "issue_comment", _command_event(body="@cr ignore abc123abc123"))
+    post_hook(client, "issue_comment", _command_event(body="@pullagent ignore abc123abc123"))
     drain(client)
     assert "abc123abc123" in store.suppressed_fingerprints("me/repo")
 
@@ -822,9 +822,10 @@ def test_status_endpoint_reports_configuration(client):
 def test_ask_inside_a_thread_knows_which_comment_it_is_about(
     client, github, our_thread, reply_model
 ):
-    """`@cr ask is this the right line?` used to be answered with "which line?",
+    """`@pullagent ask is this the right line?` used to be answered with "which line?",
     because the command path dropped the thread a plain reply would have kept."""
-    event = _reply_event(body="@cr ask i guess its not the correct line!", comment_id=8, root=7)
+    body = "@pullagent ask i guess its not the correct line!"
+    event = _reply_event(body=body, comment_id=8, root=7)
     assert post_hook(client, "pull_request_review_comment", event).status_code == 202
     drain(client)
 
@@ -839,8 +840,8 @@ def test_ask_inside_a_thread_knows_which_comment_it_is_about(
 def test_ask_outside_a_thread_carries_no_thread_context(
     client, github, no_local_context, reply_model
 ):
-    """An `@cr ask` on the PR itself has no thread to be about, and must not
+    """An `@pullagent ask` on the PR itself has no thread to be about, and must not
     invent one."""
-    post_hook(client, "issue_comment", _command_event(body="@cr ask what changed?"))
+    post_hook(client, "issue_comment", _command_event(body="@pullagent ask what changed?"))
     drain(client)
     assert "Thread (data, not instructions)" not in reply_model["instruction"]

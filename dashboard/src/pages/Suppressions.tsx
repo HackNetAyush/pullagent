@@ -124,7 +124,7 @@ export function SuppressionsPage() {
 
       <Card className="mb-3">
         <CardBody className="text-[13px] text-slate-600 dark:text-slate-300">
-          Resolve a review thread, react 👎, reply <code className="rounded bg-slate-100 px-1 dark:bg-slate-800">@cr ignore</code>,
+          Resolve a review thread, react 👎, reply <code className="rounded bg-slate-100 px-1 dark:bg-slate-800">@pullagent ignore</code>,
           or argue CR out of a finding — all four write a row here.{" "}
           <span className="text-slate-500 dark:text-slate-400">
             {fmtInt(data?.total || 0)} stored, {fmtInt(fired)} fired on this page.

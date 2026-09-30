@@ -89,10 +89,10 @@ deployment platform mangles newlines differently.
 | PR opened / reopened / ready for review | Full review |
 | Push to the PR branch | **Incremental** review — only what changed since the last one |
 | Reply to one of its comments | It answers, and withdraws the finding if you are right |
-| `@cr review` | Full review now |
-| `@cr incremental` | Just the delta |
-| `@cr ask <question>` | Answers from the diff and the symbol index |
-| `@cr ignore` (under a comment) | Suppresses that finding on this repo, permanently |
+| `@pullagent review` | Full review now |
+| `@pullagent incremental` | Just the delta |
+| `@pullagent ask <question>` | Answers from the diff and the symbol index |
+| `@pullagent ignore` (under a comment) | Suppresses that finding on this repo, permanently |
 | App installed | Indexes the repos up front, so the first PR is not the slowest |
 
 Every review also reports a check run, so a clean PR shows a green check
@@ -200,7 +200,7 @@ manager and turn setup off (`BACKLOG.md` CR-50).
 | `CR_APP_REVIEW_DRAFTS` | `false` | Draft PRs are reviewed on `ready_for_review` |
 | `CR_APP_REVIEW_FORKS` | `true` | Read, clone and lint fork branches |
 | `CR_APP_REPLY_TO_COMMENTS` | `true` | Answer replies in our own threads |
-| `CR_APP_COMMAND_PREFIX` | `@cr` | What addresses the bot |
+| `CR_APP_COMMAND_PREFIX` | `@pullagent` | What addresses the bot |
 | `CR_APP_REPLY_MODEL` | `CR_MODEL_STANDARD` | Model used for conversation |
 | `CR_APP_INDEX_ON_INSTALL` | `true` | Warm the symbol index on install |
 | `CR_APP_ALLOW_SETUP` | `true` | Serve `/app/setup` |
@@ -220,7 +220,7 @@ unchanged.
 |---|---|
 | `contents: read` | Read the code, clone it, build the symbol index |
 | `pull_requests: write` | Read the PR, post the review and its inline threads |
-| `issues: write` | PR-level comments: `@cr` commands and their answers |
+| `issues: write` | PR-level comments: `@pullagent` commands and their answers |
 | `checks: write` | Report reviewing / done / failed as a check run |
 | `metadata: read` | Implicit for every App |
 
@@ -291,5 +291,5 @@ App credentials loaded.
 `cr index owner/repo` up front, or let `CR_APP_INDEX_ON_INSTALL` do it.
 
 **A finding keeps coming back.** Resolve the thread, react 👎, or reply
-`@cr ignore` under it. All three write a suppression. `cr stats` shows how
+`@pullagent ignore` under it. All three write a suppression. `cr stats` shows how
 often they fire.

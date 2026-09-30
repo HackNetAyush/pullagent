@@ -53,7 +53,7 @@ PERMISSIONS: dict[str, str] = {
     "contents": "read",
     # Read the PR and post the review with its inline threads.
     "pull_requests": "write",
-    # PR-level comments: `@cr` commands and their answers.
+    # PR-level comments: `@pullagent` commands and their answers.
     "issues": "write",
     # Report "reviewing / done / failed" as a check run, so a clean review has
     # somewhere to land that is not another comment.

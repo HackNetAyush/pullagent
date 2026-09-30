@@ -120,7 +120,7 @@ Full guide: [`docs/GITHUB_APP.md`](docs/GITHUB_APP.md).
 | Infrastructure | none | one process + a public URL |
 | Review on push | whole PR again | **only the new commits** |
 | Replies to your comments | no | **yes, and it withdraws when you are right** |
-| `@cr ask` / `@cr review` | no | **yes** |
+| `@pullagent ask` / `@pullagent review` | no | **yes** |
 | Fork PRs | **skipped** | reviewed |
 | Isolation | ephemeral VM per run | the host (see below) |
 

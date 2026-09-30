@@ -1,4 +1,4 @@
-"""Talking back: replies in our own review threads, and `@cr` commands.
+"""Talking back: replies in our own review threads, and `@pullagent` commands.
 
 A review comment is a claim, and a claim someone can argue with is worth more
 than one they cannot. This module is the other half of the loop the store was
@@ -12,7 +12,7 @@ Three constraints shape everything here:
 generating anything. A bot that replies to its own replies bills you forever.
 
 **Only in threads we started.** We answer a reply under one of our comments,
-or an explicit `@cr`. We do not join conversations between humans.
+or an explicit `@pullagent`. We do not join conversations between humans.
 
 **Conceding is a write, not a sentence.** When the model withdraws a finding,
 that becomes a `Suppression` row for the repo — the same mechanism `cr learn`
@@ -173,7 +173,7 @@ async def handle_reply(
 async def handle_command(
     payload: dict[str, Any], auth: AppAuth, *, settings: Settings | None = None
 ) -> ReplyOutcome:
-    """Run an `@cr ...` command. Reviews are queued by the caller, not here."""
+    """Run an `@pullagent ...` command. Reviews are queued by the caller, not here."""
     s = settings or default_settings
     repo: str = payload["repo"]
     number = int(payload["pr_number"])
@@ -282,7 +282,7 @@ async def _ask(
         log.warning("could not read the diff to answer a question on %s: %s", repo, e)
         diff = ""
 
-    # `@cr ask` typed inside one of our review threads is almost always *about*
+    # `@pullagent ask` typed inside one of our review threads is almost always *about*
     # that thread — "is this the right line?" means nothing without it. A plain
     # reply already carries this context; the command path used to drop it and
     # then ask the human which comment they meant.
@@ -348,8 +348,8 @@ async def _ignore(
     if not wanted:
         await _say(
             gh,
-            "Reply `@cr ignore` under the comment you want suppressed, or pass its "
-            "fingerprint: `@cr ignore a1b2c3d4e5f6`.",
+            "Reply `@pullagent ignore` under the comment you want suppressed, or pass its "
+            "fingerprint: `@pullagent ignore a1b2c3d4e5f6`.",
             comment_id,
             in_thread,
         )
@@ -406,7 +406,7 @@ def _thread(comments: list[dict], root_id: int) -> list[dict]:
 def _thread_json(thread: list[dict], root: dict) -> str:
     """The conversation as data.
 
-    Bodies are passed through as written — including any `@cr` line and any
+    Bodies are passed through as written — including any `@pullagent` line and any
     instruction-shaped text. The preamble is what makes that safe: this block
     is labelled as untrusted evidence, and the model is told not to obey it.
     """

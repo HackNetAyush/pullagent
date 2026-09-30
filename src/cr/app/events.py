@@ -120,7 +120,7 @@ class Policy:
     review_drafts: bool = False
     review_forks: bool = True
     reply_to_comments: bool = True
-    command_prefix: str = "@cr"
+    command_prefix: str = "@pullagent"
     index_on_install: bool = True
 
     @classmethod
@@ -333,12 +333,12 @@ _ALIASES = {
 }
 
 
-def parse_command(body: str, prefix: str = "@cr") -> tuple[str, str] | None:
-    """Find `@cr <command> [args]` in a comment.
+def parse_command(body: str, prefix: str = "@pullagent") -> tuple[str, str] | None:
+    """Find `@pullagent <command> [args]` in a comment.
 
     Scanned line by line rather than only at the start, so a command quoted
     under a reply still works — but a mention buried mid-sentence does not
-    fire, because "I wish @cr would stop" is not a request to review.
+    fire, because "I wish @pullagent would stop" is not a request to review.
     """
     if not prefix or not body:
         return None
@@ -366,7 +366,7 @@ def parse_command(body: str, prefix: str = "@cr") -> tuple[str, str] | None:
     return None
 
 
-def help_text(prefix: str = "@cr") -> str:
+def help_text(prefix: str = "@pullagent") -> str:
     lines = [
         "**CR commands**",
         "",

@@ -82,8 +82,8 @@ class Settings(BaseSettings):
     # Wait this long after a push before reviewing: a rapid series of commits
     # collapses into one review of the final head.
     app_debounce_s: float = Field(default=20.0, ge=0.0, le=600.0)
-    # What addresses the bot in a PR comment: "@cr review", "@cr ask ...".
-    app_command_prefix: str = "@cr"
+    # What addresses the bot in a PR comment: "@pullagent review", "@pullagent ask ...".
+    app_command_prefix: str = "@pullagent"
     # Reply to human replies on our own review threads.
     app_reply_to_comments: bool = True
     app_reply_model: str | None = None

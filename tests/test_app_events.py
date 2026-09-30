@@ -198,7 +198,8 @@ def test_replies_can_be_switched_off():
 
 
 def test_command_in_a_new_thread_still_fires():
-    d = decide("pull_request_review_comment", _comment_payload("@cr review", in_reply_to=None))
+    payload = _comment_payload("@pullagent review", in_reply_to=None)
+    d = decide("pull_request_review_comment", payload)
     assert d.action == "command"
     assert d.command == "review"
 
@@ -220,7 +221,7 @@ def _issue_payload(body: str, **over):
 
 
 def test_pr_comment_command_fires():
-    d = decide("issue_comment", _issue_payload("@cr review please"))
+    d = decide("issue_comment", _issue_payload("@pullagent review please"))
     assert d.action == "command"
     assert d.command == "review"
     assert d.in_thread is False
@@ -231,7 +232,7 @@ def test_pr_chatter_without_a_command_is_ignored():
 
 
 def test_comments_on_plain_issues_are_ignored():
-    payload = _issue_payload("@cr review")
+    payload = _issue_payload("@pullagent review")
     payload["issue"].pop("pull_request")
     assert decide("issue_comment", payload).action == "ignore"
 
@@ -301,17 +302,17 @@ def test_repositories_added_carries_only_the_delta():
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        ("@cr review", ("review", "")),
-        ("@CR REVIEW", ("review", "")),
-        ("@cr re-review", ("review", "")),
-        ("@cr incremental", ("incremental", "")),
-        ("@cr ask why does this retry twice?", ("ask", "why does this retry twice?")),
-        ("@cr explain the change", ("ask", "the change")),
-        ("@cr ignore a1b2c3d4e5f6", ("ignore", "a1b2c3d4e5f6")),
-        ("@cr", ("help", "")),
-        ("@cr help", ("help", "")),
-        ("thanks!\n@cr review", ("review", "")),
-        ("@cr what about the null case", ("ask", "what about the null case")),
+        ("@pullagent review", ("review", "")),
+        ("@PULLAGENT REVIEW", ("review", "")),
+        ("@pullagent re-review", ("review", "")),
+        ("@pullagent incremental", ("incremental", "")),
+        ("@pullagent ask why does this retry twice?", ("ask", "why does this retry twice?")),
+        ("@pullagent explain the change", ("ask", "the change")),
+        ("@pullagent ignore a1b2c3d4e5f6", ("ignore", "a1b2c3d4e5f6")),
+        ("@pullagent", ("help", "")),
+        ("@pullagent help", ("help", "")),
+        ("thanks!\n@pullagent review", ("review", "")),
+        ("@pullagent what about the null case", ("ask", "what about the null case")),
     ],
 )
 def test_commands_parse(body, expected):
@@ -322,8 +323,8 @@ def test_commands_parse(body, expected):
     "body",
     [
         "no mention here",
-        "I wish @cr would stop commenting",  # mid-sentence, not addressed
-        "> @cr review",  # quoted context from a reply
+        "I wish @pullagent would stop commenting",  # mid-sentence, not addressed
+        "> @pullagent review",  # quoted context from a reply
         "",
     ],
 )
@@ -333,13 +334,13 @@ def test_non_commands_do_not_fire(body):
 
 def test_command_prefix_is_configurable():
     assert parse_command("@mybot review", prefix="@mybot") == ("review", "")
-    assert parse_command("@cr review", prefix="@mybot") is None
+    assert parse_command("@pullagent review", prefix="@mybot") is None
 
 
 def test_help_lists_every_command():
-    text = help_text("@cr")
+    text = help_text("@pullagent")
     for name in ("review", "incremental", "ask", "ignore", "help"):
-        assert f"@cr {name}" in text
+        assert f"@pullagent {name}" in text
 
 
 # --- unknown events ----------------------------------------------------------
