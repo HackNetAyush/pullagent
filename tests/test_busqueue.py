@@ -9,6 +9,10 @@ a superseded job is dropped rather than executed.
 
 from __future__ import annotations
 
+import asyncio
+import sys
+from types import ModuleType
+
 import pytest
 
 from cr.store import db as store
@@ -93,3 +97,33 @@ def test_settings_pick_the_backend(tmp_path, monkeypatch):
     )
     assert bussed.queue.snapshot()["backend"] == "servicebus"
     assert bussed.queue.snapshot()["consuming"] is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sends_share_one_sender_safely(monkeypatch):
+    from cr.app.busqueue import ServiceBusQueue
+
+    azure = ModuleType("azure")
+    servicebus = ModuleType("azure.servicebus")
+    servicebus.ServiceBusMessage = lambda body, **kwargs: (body, kwargs)
+    monkeypatch.setitem(sys.modules, "azure", azure)
+    monkeypatch.setitem(sys.modules, "azure.servicebus", servicebus)
+
+    class Sender:
+        active = False
+        sent = []
+
+        async def send_messages(self, message):
+            assert not self.active
+            self.active = True
+            await asyncio.sleep(0)
+            self.sent.append(message)
+            self.active = False
+
+    async def handler(_job):
+        pass
+
+    queue = ServiceBusQueue(handler, connection_string="unused")
+    queue._sender = Sender()
+    await asyncio.gather(queue._send(1, "first", 0), queue._send(2, "second", 0))
+    assert len(queue._sender.sent) == 2

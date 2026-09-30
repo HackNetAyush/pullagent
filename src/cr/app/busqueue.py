@@ -85,6 +85,9 @@ class ServiceBusQueue:
         self._running: dict[str, asyncio.Task] = {}
         self._stopping = False
         self._sem = asyncio.Semaphore(self._concurrency)
+        # The SDK sender opens one AMQP link. Simultaneous first sends during
+        # orphan recovery can corrupt that link and strand persisted rows.
+        self._send_lock = asyncio.Lock()
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -184,21 +187,32 @@ class ServiceBusQueue:
         if self._sender is None:
             log.error("no Service Bus sender; job %s stays queued for recovery", row_id)
             return
-        msg = ServiceBusMessage(
-            json.dumps({"row_id": row_id, "key": key}),
-            content_type="application/json",
-            # Not a dedup key: Postgres already decided what is current. This
-            # is for reading the queue in the portal when something is wrong.
-            subject=key[:128],
-        )
-        try:
-            if delay_s > 0:
-                when = datetime.now(UTC) + timedelta(seconds=delay_s)
-                await self._sender.schedule_messages(msg, when)
-            else:
-                await self._sender.send_messages(msg)
-        except Exception as e:  # noqa: BLE001 - the row survives; recovery re-sends
-            log.error("could not send job %s to Service Bus: %s", row_id, e)
+        for attempt in range(3):
+            try:
+                async with self._send_lock:
+                    if self._sender is None or self._stopping:
+                        log.warning("queue stopped; job %s stays queued for recovery", row_id)
+                        return
+                    # Build a fresh SDK message for each attempt: a failed send
+                    # may already have transferred ownership of the prior one.
+                    msg = ServiceBusMessage(
+                        json.dumps({"row_id": row_id, "key": key}),
+                        content_type="application/json",
+                        # Postgres decides which job is current. The subject
+                        # only helps inspect the queue in the portal.
+                        subject=key[:128],
+                    )
+                    if delay_s > 0:
+                        when = datetime.now(UTC) + timedelta(seconds=delay_s)
+                        await self._sender.schedule_messages(msg, when)
+                    else:
+                        await self._sender.send_messages(msg)
+                return
+            except Exception as e:  # noqa: BLE001 - a duplicate nudge is safe
+                if attempt == 2:
+                    log.error("could not send job %s to Service Bus: %s", row_id, e)
+                else:
+                    await asyncio.sleep(2**attempt)
 
     # --- consumption --------------------------------------------------------
 

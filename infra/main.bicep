@@ -95,9 +95,9 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 // --- storage ----------------------------------------------------------------
-// Azure Files, not Blob. Git needs a POSIX filesystem to maintain a mirror, and
-// every other artefact (symbol graphs, the review cache) already lives under
-// the same CR_CACHE_DIR — so one mount replaces three storage integrations.
+// Azure Files persists symbol graphs and review results across worker restarts.
+// Git mirrors live on each worker's local filesystem because Git needs chmod,
+// which is unsupported on the SMB mount. Blob would add another integration.
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: '${name}store'
@@ -237,7 +237,7 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
       accountName: storage.name
       accountKey: storage.listKeys().keys[0].value
       shareName: cacheShare.name
-      // Both revisions read and write the same mirrors.
+      // Web and worker can read the persisted graphs and review cache.
       accessMode: 'ReadWrite'
     }
   }
@@ -387,7 +387,12 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
           // Reviews hold a whole PR diff, a symbol graph slice and several
           // concurrent model responses in memory at once.
           resources: { cpu: json('1.0'), memory: '2Gi' }
-          env: concat(sharedEnv, [{ name: 'CR_APP_ROLE', value: 'worker' }])
+          env: concat(sharedEnv, [
+            { name: 'CR_APP_ROLE', value: 'worker' }
+            // Azure Files is SMB and Git needs chmod during clone. Keep mirrors
+            // on the worker's local filesystem; graphs and reviews stay on the share.
+            { name: 'CR_MIRROR_DIR', value: '/tmp/cr-mirrors' }
+          ])
           volumeMounts: cacheMount
         }
       ]

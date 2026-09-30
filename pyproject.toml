@@ -29,8 +29,8 @@ store = [
     "psycopg[binary]>=3.2",
     "alembic>=1.14",
 ]
-# The cloud-only dependencies: Postgres and the Service Bus queue. Git mirrors
-# and review caches use the mounted Azure Files share.
+# The cloud-only dependencies: Postgres and the Service Bus queue. Review
+# caches use Azure Files; Git mirrors use each worker's local filesystem.
 azure = [
     "psycopg[binary]>=3.2",
     "azure-servicebus>=7.12",

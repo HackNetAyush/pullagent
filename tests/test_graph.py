@@ -117,3 +117,16 @@ def test_co_change_drops_single_occurrences() -> None:
     ranked = [(f, n) for f, n in counts.items() if n >= 2]
     assert sorted(ranked, key=lambda kv: kv[1], reverse=True) == [("b.py", 5), ("c.py", 2)]
     assert cache is not None
+
+
+def test_git_mirror_can_use_local_disk_while_cache_is_shared(tmp_path, monkeypatch) -> None:
+    from cr.repo import RepoCache
+
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("CR_MIRROR_DIR", str(local))
+    cache = RepoCache(shared)
+
+    assert cache.mirror_path("owner/repo") == local / "owner__repo.git"
+    assert local.is_dir()
+    assert not (shared / "mirrors").exists()

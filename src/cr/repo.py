@@ -1,7 +1,7 @@
-"""Warm repo cache: bare mirror per repo, throwaway worktree per review.
+"""Warm repo cache: local bare mirror per repo, throwaway worktree per review.
 
 Cloning a large repo per review is 60-120s. Fetching a delta into a warm mirror
-is ~2s. The mirror is shared and read-only; each review gets its own worktree.
+is ~2s. Each worker keeps its own mirror; each review gets its own worktree.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -52,13 +52,15 @@ def _run(args: list[str], cwd: Path | None = None, timeout: int = 900) -> str:
 @dataclass
 class RepoCache:
     root: Path
+    mirrors: Path = field(init=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
-        (self.root / "mirrors").mkdir(parents=True, exist_ok=True)
+        self.mirrors = Path(os.environ.get("CR_MIRROR_DIR") or self.root / "mirrors")
+        self.mirrors.mkdir(parents=True, exist_ok=True)
 
     def mirror_path(self, slug: str) -> Path:
-        return self.root / "mirrors" / (slug.replace("/", "__") + ".git")
+        return self.mirrors / (slug.replace("/", "__") + ".git")
 
     def is_warm(self, slug: str) -> bool:
         return (self.mirror_path(slug) / "HEAD").exists()

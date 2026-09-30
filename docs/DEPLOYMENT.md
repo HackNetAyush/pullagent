@@ -34,11 +34,10 @@ worker move a row from `queued` to `running`. The app uses a Send/Listen key;
 the scaler uses a separate Manage key scoped only to `cr-jobs` so it can read
 queue depth. That stronger key is not mapped into the app process environment.
 
-**Azure Files**, mounted at `/cache`, holds the git mirrors. This is the one
-thing that genuinely needs a POSIX filesystem — git cannot maintain a mirror in
-blob storage. The symbol graphs and the review cache live there too, because
-everything under `CR_CACHE_DIR` already does and one mount is simpler than
-three storage integrations.
+**Azure Files**, mounted at `/cache`, holds symbol graphs and the review cache
+across worker restarts. Git mirrors live at `/tmp/cr-mirrors` on each worker:
+Git needs to change file permissions during clone, which the Azure Files SMB
+mount does not support. A new worker may need a cold clone before it can review.
 
 **No Blob, no Redis.** Both were considered and neither earns its place yet.
 The review cache is content-addressed files on the share; the token cache is
