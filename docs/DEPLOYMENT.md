@@ -30,7 +30,9 @@ write time, which is what makes five pushes cost one review.
 **Service Bus** holds no state. Its messages say "look at job row N". A
 duplicate delivery, a redelivery after a crash, and a message that lost its
 race all converge on the same answer, because `claim_job` lets exactly one
-worker move a row from `queued` to `running`.
+worker move a row from `queued` to `running`. The app uses a Send/Listen key;
+the scaler uses a separate Manage key scoped only to `cr-jobs` so it can read
+queue depth. That stronger key is not mapped into the app process environment.
 
 **Azure Files**, mounted at `/cache`, holds the git mirrors. This is the one
 thing that genuinely needs a POSIX filesystem — git cannot maintain a mirror in
@@ -48,7 +50,8 @@ GitHub webhooks get a prompt response, and the Basic registry plus the small
 PostgreSQL server run continuously. The worker scales to zero. Azure Files is
 billed for used storage and transactions. Model calls are an additional
 per-review cost. Check the Azure pricing calculator for the chosen region and
-set a subscription budget before inviting other accounts.
+set a resource-group budget with email alerts before inviting other accounts.
+An Azure budget sends alerts; it does not stop spending.
 
 ---
 
@@ -103,13 +106,16 @@ In the App's settings, set the webhook URL to the address from the summary
 (`https://<fqdn>/webhook`) and the callback URL to `https://<fqdn>/auth/callback`.
 The smee relay is no longer involved.
 
-### 5. Make yourself an administrator, then approve yourself
+### 5. Make yourself an administrator, then decide which installations to approve
 
 `CR_ADMIN_LOGINS` promotes you on your **first sign-in**, so visit the
-dashboard and sign in before anything else. Then:
+dashboard and sign in before anything else. Approval is account-wide: it can
+enable reviews in every repository included in that account's GitHub App
+installation. Narrow the installation to selected repositories in GitHub
+before approving the account if you want to bound model costs. Then:
 
 ```bash
-cr app approve --all-installed     # everyone already using it keeps working
+cr app approve <login>             # enables the selected account's installation
 cr app accounts                    # check
 ```
 
@@ -125,9 +131,8 @@ on a public App is a stranger spending your budget, while the cost of it being
 on unnecessarily is one command. The consequence is that upgrading an existing
 installation stops reviews until an account is approved.
 
-`cr app approve --all-installed` exists for exactly that moment: it approves
-every account that already has the App installed, so nobody who was working
-yesterday is broken today. `check_ready()` also prints a warning at start-up
+`cr app approve --all-installed` is available when you have reviewed every
+installed account and want them all to continue. `check_ready()` also prints a warning at start-up
 when approval is required and nothing is approved, so the failure announces
 itself rather than looking like an outage.
 

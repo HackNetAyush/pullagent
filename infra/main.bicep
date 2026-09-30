@@ -148,7 +148,11 @@ resource jobsQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' =
     // Dead-letter rather than drop: a job that fails three times is a bug
     // someone needs to see, not a message to lose quietly.
     deadLetteringOnMessageExpiration: true
-    defaultMessageTimeToLive: 'PT1H'
+    // A single review runs 30+ minutes, and a queue that backed up behind a
+    // scaler outage takes longer still. An hour expired real work that nothing
+    // would ever retry: the Postgres row stays 'queued' once the message is
+    // gone, so the job is neither running nor recoverable.
+    defaultMessageTimeToLive: 'PT6H'
   }
 }
 
@@ -156,6 +160,14 @@ resource sbSend 'Microsoft.ServiceBus/namespaces/AuthorizationRules@2022-10-01-p
   parent: sb
   name: 'cr-app'
   properties: { rights: ['Send', 'Listen'] }
+}
+
+// KEDA queries queue runtime metadata, which needs Manage. Scope that key to
+// this one queue, and keep it out of the application's environment variables.
+resource sbScale 'Microsoft.ServiceBus/namespaces/queues/authorizationRules@2022-10-01-preview' = {
+  parent: jobsQueue
+  name: 'cr-scaler'
+  properties: { rights: ['Manage', 'Send', 'Listen'] }
 }
 
 // --- database ---------------------------------------------------------------
@@ -234,6 +246,7 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
 var pgHost = '${pg.name}.postgres.database.azure.com'
 var dbUrl = 'postgresql+psycopg://${pgAdmin}:${uriComponent(pgPassword)}@${pgHost}:5432/cr?sslmode=require'
 var sbConn = sbSend.listKeys().primaryConnectionString
+var sbScaleConn = sbScale.listKeys().primaryConnectionString
 
 // Environment shared by both revisions. Anything secret is referenced through
 // the container app's own secret store rather than inlined here.
@@ -362,7 +375,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         { server: acr.properties.loginServer, identity: identity.id }
       ]
-      secrets: sharedSecrets
+      secrets: concat(sharedSecrets, [{ name: 'sb-scale-conn', value: sbScaleConn }])
     }
     template: {
       containers: [
@@ -394,7 +407,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = {
                 messageCount: '1'
               }
               auth: [
-                { secretRef: 'sb-conn', triggerParameter: 'connection' }
+                { secretRef: 'sb-scale-conn', triggerParameter: 'connection' }
               ]
             }
           }
