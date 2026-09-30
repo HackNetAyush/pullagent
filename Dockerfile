@@ -17,7 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
     # Mounted from Azure Files in the deployed environment. Everything that has
     # to survive a replica — git mirrors, the symbol graph, the review cache —
     # already derives from this one variable.
-    CR_CACHE_DIR=/cache
+    CR_CACHE_DIR=/cache \
+    CR_DASHBOARD_DIST=/app/dashboard/dist
 
 WORKDIR /app
 

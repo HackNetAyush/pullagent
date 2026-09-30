@@ -7,6 +7,7 @@ from CI shows up live without any extra plumbing.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -507,5 +508,8 @@ def mount_ui(app_: FastAPI, dist: Path) -> None:
         )
 
 
-_DIST = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+_DIST = Path(
+    os.environ.get("CR_DASHBOARD_DIST")
+    or Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+)
 mount_ui(app, _DIST)
