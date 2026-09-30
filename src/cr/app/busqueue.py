@@ -82,6 +82,7 @@ class ServiceBusQueue:
         self._client: Any = None
         self._sender: Any = None
         self._loop_task: asyncio.Task | None = None
+        self._recover_task: asyncio.Task | None = None
         self._running: dict[str, asyncio.Task] = {}
         self._stopping = False
         self._sem = asyncio.Semaphore(self._concurrency)
@@ -101,13 +102,19 @@ class ServiceBusQueue:
         if self._consume:
             self._loop_task = asyncio.create_task(self._consume_loop(), name="cr-bus-consumer")
             if recover:
-                # Rows left `running` by a worker that died are invisible to
-                # Service Bus, whose message was completed or expired. Re-send
-                # a nudge for each so they are not stranded.
                 self._requeue_orphans()
+        elif recover:
+            # The web tier stays up when workers scale to zero. It can wake a
+            # worker for a lost send or a job abandoned by a killed revision.
+            self._recover_task = asyncio.create_task(self._recover_loop(), name="cr-bus-recovery")
 
-    async def stop(self, *, grace_s: float = 30.0) -> None:
+    async def stop(self, *, grace_s: float = 10.0) -> None:
         self._stopping = True
+        if self._recover_task is not None:
+            self._recover_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._recover_task
+            self._recover_task = None
         if self._loop_task is not None:
             self._loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -133,11 +140,25 @@ class ServiceBusQueue:
             self._client = None
 
     def _requeue_orphans(self) -> None:
-        rows = store.pending_jobs()
-        for row in rows:
-            asyncio.get_running_loop().create_task(self._send(row.id, row.key, 0.0))
-        if rows:
-            log.info("re-sent %d orphaned job(s) to the queue", len(rows))
+        nudges = store.recover_jobs()
+        for row_id, key in nudges:
+            asyncio.get_running_loop().create_task(self._send(row_id, key, 0.0))
+        if nudges:
+            log.info("re-sent %d recovered job(s) to the queue", len(nudges))
+
+    async def _recover_loop(self) -> None:
+        while not self._stopping:
+            try:
+                nudges = await asyncio.to_thread(store.recover_jobs)
+                for row_id, key in nudges:
+                    await self._send(row_id, key, 0.0)
+                if nudges:
+                    log.info("re-sent %d recovered job(s) to the queue", len(nudges))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - retry on next sweep
+                log.exception("queue recovery sweep failed")
+            await asyncio.sleep(60)
 
     # --- submission ---------------------------------------------------------
 
@@ -262,7 +283,7 @@ class ServiceBusQueue:
             installation_id=row.installation_id,
             row_id=row.id,
         )
-        renew = asyncio.create_task(self._renew(receiver, msg))
+        renew = asyncio.create_task(self._renew(receiver, msg, job.row_id))
         self._running[job.key] = asyncio.current_task()  # type: ignore[assignment]
         try:
             await self._handler(job)
@@ -284,15 +305,20 @@ class ServiceBusQueue:
             renew.cancel()
             self._running.pop(job.key, None)
 
-    async def _renew(self, receiver: Any, msg: Any) -> None:
+    async def _renew(self, receiver: Any, msg: Any, row_id: int) -> None:
         """Hold the lock while a review runs. Reviews outlast any sane lock."""
         while True:
             await asyncio.sleep(LOCK_RENEW_S)
             try:
+                await asyncio.to_thread(store.heartbeat_job, row_id)
+            except Exception as e:  # noqa: BLE001 - retry on next heartbeat
+                log.warning("could not heartbeat job %s: %s", row_id, e)
+            try:
                 await receiver.renew_message_lock(msg)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not renew message lock: %s", e)
-                return
+                # The worker may still finish and post. Keep the DB lease live
+                # until that happens, so recovery cannot duplicate a paid run.
 
     # --- introspection ------------------------------------------------------
 

@@ -669,6 +669,7 @@ def set_job_status(
                 row.attempts += 1
             if status == "running":
                 row.started_at = _utcnow()
+                row.run_after = _utcnow()  # initial worker lease timestamp
             elif status in ("done", "failed", "skipped"):
                 row.finished_at = _utcnow()
     except Exception as e:  # noqa: BLE001
@@ -698,6 +699,64 @@ def pending_jobs(limit: int = 200, url: str | None = None) -> list[Job]:
     except Exception as e:  # noqa: BLE001
         log.warning("pending_jobs failed: %s", e)
         return []
+
+
+def heartbeat_job(job_id: int, url: str | None = None) -> None:
+    """Keep a running job's lease fresh while its worker is alive."""
+    with session(url) as s:
+        row = s.get(Job, job_id)
+        if row is not None and row.status == "running":
+            row.run_after = _utcnow()
+
+
+def recover_jobs(url: str | None = None, *, limit: int = 200) -> list[tuple[int, str]]:
+    """Re-send lost queue nudges and reclaim jobs whose worker disappeared.
+
+    The web tier calls this every minute, so recovery also works after the
+    last worker has scaled to zero. `run_after` doubles as the heartbeat for a
+    running job; it has no scheduling meaning after the job is claimed.
+    """
+    now = _utcnow().replace(tzinfo=None)
+    queued_cutoff = now - timedelta(seconds=60)
+    running_cutoff = now - timedelta(minutes=2)
+    nudges: list[tuple[int, str]] = []
+    with session(url) as s:
+        rows = s.execute(
+            select(Job)
+            .where(Job.status.in_(("queued", "running")))
+            .order_by(Job.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).scalars()
+        for row in rows:
+            if row.status == "running":
+                payload = row.payload or {}
+                if row.kind == "review" and payload.get("pr_number"):
+                    state = s.execute(
+                        select(PRState).where(
+                            PRState.repo == row.repo,
+                            PRState.pr_number == int(payload["pr_number"]),
+                        )
+                    ).scalar_one_or_none()
+                    if (
+                        state is not None
+                        and state.last_reviewed_sha == payload.get("head_sha")
+                        and state.last_reviewed_at is not None
+                        and state.last_reviewed_at >= row.created_at
+                    ):
+                        row.status = "done"
+                        row.finished_at = state.last_reviewed_at
+                        continue
+                if row.run_after > running_cutoff:
+                    continue
+                row.status = "queued"
+                row.started_at = None
+            elif row.run_after > queued_cutoff:
+                continue
+
+            row.run_after = now
+            nudges.append((row.id, row.key))
+    return nudges
 
 
 def recent_jobs(limit: int = 50, url: str | None = None) -> list[Job]:
@@ -925,6 +984,7 @@ def claim_job(row_id: int, url: str | None = None) -> Job | None:
                 return None
             row.status = "running"
             row.started_at = _utcnow()
+            row.run_after = _utcnow()
             s.flush()
             s.expunge(row)
             return row

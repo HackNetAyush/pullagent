@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 
 import pytest
@@ -97,6 +98,49 @@ def test_settings_pick_the_backend(tmp_path, monkeypatch):
     )
     assert bussed.queue.snapshot()["backend"] == "servicebus"
     assert bussed.queue.snapshot()["consuming"] is True
+
+
+def test_completed_review_is_reconciled_without_spending_again(db):
+    row_id = store.enqueue_job(
+        "review",
+        "review:me/repo#5",
+        repo="me/repo",
+        payload={"pr_number": 5, "head_sha": "abc"},
+    )
+    assert store.claim_job(row_id) is not None
+    store.record_pr_review("me/repo", 5, head_sha="abc", base_sha="def")
+
+    assert store.recover_jobs() == []
+    assert store.job_status(row_id) == "done"
+
+
+def test_stale_running_job_is_requeued_but_live_heartbeat_is_not(db):
+    from cr.store.models import Job
+
+    row_id = store.enqueue_job("index", "index:me/repo", repo="me/repo")
+    assert store.claim_job(row_id) is not None
+    with store.session() as s:
+        s.get(Job, row_id).run_after = datetime.now(UTC) - timedelta(minutes=3)
+
+    store.heartbeat_job(row_id)
+    assert store.recover_jobs() == []
+    with store.session() as s:
+        s.get(Job, row_id).run_after = datetime.now(UTC) - timedelta(minutes=3)
+
+    assert store.recover_jobs() == [(row_id, "index:me/repo")]
+    assert store.job_status(row_id) == "queued"
+    assert store.claim_job(row_id) is not None
+
+
+def test_queued_job_gets_another_nudge_after_lost_send(db):
+    from cr.store.models import Job
+
+    row_id = store.enqueue_job("index", "index:me/repo", repo="me/repo")
+    with store.session() as s:
+        s.get(Job, row_id).run_after = datetime.now(UTC) - timedelta(minutes=2)
+
+    assert store.recover_jobs() == [(row_id, "index:me/repo")]
+    assert store.recover_jobs() == []
 
 
 @pytest.mark.asyncio
