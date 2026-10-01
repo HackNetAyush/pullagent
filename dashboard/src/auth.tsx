@@ -32,8 +32,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <div className="grid min-h-screen place-items-center">
-        <div className="skeleton h-9 w-40 rounded-lg" />
+      <div className="grid h-full place-items-center bg-plane">
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-pulse-ring grid h-11 w-11 place-items-center rounded-xl bg-linear-to-br from-brand-400 to-brand-700 font-display text-[15px] font-bold text-white">
+            CR
+          </div>
+          <div className="skeleton h-2 w-24 rounded-full" />
+        </div>
       </div>
     );
   }
@@ -72,18 +77,31 @@ function SignInScreen({
   showButton?: boolean;
 }) {
   return (
-    <div className="grid min-h-screen place-items-center px-4">
-      <Card className="w-full max-w-sm">
-        <CardBody className="flex flex-col items-center gap-3 py-10 text-center">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-brand-600 font-display text-base font-700 text-white">
+    <div className="relative grid h-full place-items-center overflow-hidden bg-plane px-4">
+      {/* Decorative only: a faint grid and a brand wash, so the sign-in screen
+          is not a single flat rectangle. Nothing here carries meaning. */}
+      <div aria-hidden className="plane-grid pointer-events-none absolute inset-0" />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -top-40 left-1/2 h-80 w-[36rem] -translate-x-1/2 rounded-full opacity-25 blur-[90px]"
+        style={{ background: "var(--color-brand-500)" }}
+      />
+
+      <Card className="animate-fade-up relative w-full max-w-sm shadow-lg">
+        <CardBody className="flex flex-col items-center gap-3 px-8 py-10 text-center">
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-linear-to-br from-brand-400 to-brand-700 font-display text-[16px] font-bold text-white shadow-md inset-shadow-[0_1px_0_rgba(255,255,255,.25)]">
             CR
           </div>
           <div>
-            <h1 className="font-display text-lg font-700 text-slate-900 dark:text-slate-50">{title}</h1>
-            <p className="mt-1 text-[13px] text-slate-500 dark:text-slate-400">{hint}</p>
+            <h1 className="font-display text-[19px] font-bold tracking-[-0.01em] text-fg">{title}</h1>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-fg-muted">{hint}</p>
           </div>
           {showButton && (
-            <Button variant="primary" className="mt-1 w-full" onClick={() => location.assign("/auth/login")}>
+            <Button
+              variant="primary"
+              className="mt-2 w-full"
+              onClick={() => location.assign("/auth/login")}
+            >
               <LogIn className="h-4 w-4" />
               Continue with GitHub
             </Button>

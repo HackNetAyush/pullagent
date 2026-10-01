@@ -3,7 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Automated pull-request review: spend, findings and queue health." />
+    <meta name="color-scheme" content="light dark" />
     <title>CR — code review</title>
+    <script>
+      // Paint the right theme on the first frame. React sets this attribute in
+      // an effect, which runs after the first paint - so without this line a
+      // dark-mode user gets a full-screen white flash on every load.
+      (function () {
+        try {
+          var stored = localStorage.getItem("cr-theme");
+          var theme =
+            stored ||
+            (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {
+          /* private mode with localStorage blocked: light is a fine default */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

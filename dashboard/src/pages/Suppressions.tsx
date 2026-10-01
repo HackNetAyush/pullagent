@@ -1,12 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Search } from "lucide-react";
+
 import * as React from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { DataTable, useTableParams } from "../components/DataTable";
 import { FilterBar, PageHeader } from "../components/Layout";
-import { Badge, Card, CardBody, Input, Select, Tooltip } from "../components/ui";
+import { Badge, Card, CardBody, SearchInput, Select, Tooltip } from "../components/ui";
 import { api, type Page, type Suppression } from "../lib/api";
 import { fmtInt } from "../lib/utils";
 
@@ -60,10 +60,10 @@ export function SuppressionsPage() {
         accessorKey: "claim",
         cell: ({ row }) => (
           <div className="min-w-0 max-w-xl">
-            <p className="truncate text-slate-900 dark:text-slate-100">
-              {row.original.claim || <span className="text-slate-400">(no text recorded)</span>}
+            <p className="truncate text-fg">
+              {row.original.claim || <span className="text-fg-faint">(no text recorded)</span>}
             </p>
-            <p className="truncate text-[12px] text-slate-500 dark:text-slate-400">
+            <p className="truncate text-[12px] text-fg-muted">
               {row.original.repo}
               {row.original.file ? ` · ${row.original.file}` : ""}
               {row.original.pr ? ` · PR #${row.original.pr}` : ""}
@@ -88,13 +88,13 @@ export function SuppressionsPage() {
         accessorKey: "hits",
         size: 110,
         cell: ({ row }) => (
-          <span className="tabular-nums">
+          <span className="tabular">
             {row.original.hits > 0 ? (
-              <span className="font-600 text-slate-900 dark:text-slate-100">
+              <span className="font-semibold text-fg">
                 {fmtInt(row.original.hits)}
               </span>
             ) : (
-              <span className="text-slate-400">never</span>
+              <span className="text-fg-faint">never</span>
             )}
           </span>
         ),
@@ -104,7 +104,7 @@ export function SuppressionsPage() {
         accessorKey: "fingerprint",
         size: 130,
         cell: ({ row }) => (
-          <code className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          <code className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-fg-muted">
             {row.original.fingerprint}
           </code>
         ),
@@ -123,25 +123,22 @@ export function SuppressionsPage() {
       />
 
       <Card className="mb-3">
-        <CardBody className="text-[13px] text-slate-600 dark:text-slate-300">
-          Resolve a review thread, react 👎, reply <code className="rounded bg-slate-100 px-1 dark:bg-slate-800">@pullagent ignore</code>,
+        <CardBody className="text-[13px] text-fg-muted">
+          Resolve a review thread, react 👎, reply <code className="rounded bg-surface-2 px-1">@pullagent ignore</code>,
           or argue CR out of a finding — all four write a row here.{" "}
-          <span className="text-slate-500 dark:text-slate-400">
+          <span className="text-fg-muted">
             {fmtInt(data?.total || 0)} stored, {fmtInt(fired)} fired on this page.
           </span>
         </CardBody>
       </Card>
 
       <FilterBar>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search claims…"
-            className="w-64 pl-8"
-          />
-        </div>
+        <SearchInput
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search claims…"
+          wrapperClassName="w-64"
+        />
         <Select
           value={t.get("reason")}
           onChange={(v) => t.setFilter("reason", v)}
