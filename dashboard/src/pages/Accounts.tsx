@@ -56,8 +56,8 @@ export function AccountsPage() {
         accessorKey: "login",
         cell: ({ row }) => (
           <div>
-            <p className="font-medium text-slate-900 dark:text-slate-100">{row.original.login}</p>
-            <p className="text-[12px] text-slate-500 dark:text-slate-400">
+            <p className="font-medium text-fg">{row.original.login}</p>
+            <p className="text-[12px] text-fg-muted">
               {row.original.account_type || "user"}
               {row.original.requested_by && ` · asked by ${row.original.requested_by}`}
             </p>
@@ -79,12 +79,12 @@ export function AccountsPage() {
         cell: ({ row }) =>
           row.original.blocked_events > 0 ? (
             <Tooltip label={`Last blocked ${relTime(row.original.last_blocked_at)}`}>
-              <span className="tabular-nums text-[var(--warning)]">
+              <span className="tabular text-warning">
                 {fmtInt(row.original.blocked_events)} turned away
               </span>
             </Tooltip>
           ) : (
-            <span className="text-slate-300 dark:text-slate-600">—</span>
+            <span className="text-fg-faint">—</span>
           ),
       },
       {
@@ -93,11 +93,11 @@ export function AccountsPage() {
         size: 150,
         cell: ({ row }) =>
           row.original.decided_by ? (
-            <span className="text-[12px] text-slate-500 dark:text-slate-400">
+            <span className="text-[12px] text-fg-muted">
               {row.original.decided_by} · {relTime(row.original.decided_at)}
             </span>
           ) : (
-            <span className="text-slate-300 dark:text-slate-600">—</span>
+            <span className="text-fg-faint">—</span>
           ),
       },
       {
@@ -144,7 +144,7 @@ export function AccountsPage() {
         description="Which GitHub accounts CR will review for. Nothing is reviewed for an account that is not approved."
         actions={
           pending > 0 ? (
-            <Badge className="bg-[var(--warning)]/15 text-[var(--warning)]">
+            <Badge className="bg-warning/15 text-warning">
               {pending} awaiting a decision
             </Badge>
           ) : undefined
@@ -152,8 +152,8 @@ export function AccountsPage() {
       />
 
       <Card className="mb-3">
-        <CardBody className="flex items-start gap-2.5 text-[13px] text-slate-600 dark:text-slate-300">
-          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--good)]" />
+        <CardBody className="flex items-start gap-2.5 text-[13px] text-fg-muted">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-good" />
           <p>
             This gate is default-deny — an account that is unreachable, unknown or pending is
             refused, not allowed through. Approving an account lets it spend this

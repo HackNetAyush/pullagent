@@ -30,6 +30,7 @@ import {
   SERIES_VARS,
   SEVERITY_ORDER,
   SEVERITY_VAR,
+  cn,
   fmtAxisUSD,
   fmtInt,
   fmtUSD,
@@ -40,15 +41,15 @@ const AXIS = { fontSize: 11, fill: "var(--axis)" };
 
 function TooltipBox({ rows, label }: { rows: { name: string; value: string; color?: string }[]; label?: string }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[12px] shadow-lg dark:border-slate-700 dark:bg-[#151b28]">
-      {label && <p className="mb-1 font-600 text-slate-900 dark:text-slate-100">{label}</p>}
+    <div className="animate-pop-in rounded-xl border border-line bg-surface px-3 py-2 text-[12px] shadow-lg">
+      {label && <p className="mb-1.5 font-semibold text-fg">{label}</p>}
       {rows.map((r) => (
-        <p key={r.name} className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+        <p key={r.name} className="flex items-center gap-1.5 py-px text-fg-muted">
           {r.color && (
             <span aria-hidden className="h-2 w-2 rounded-full" style={{ background: r.color }} />
           )}
           <span>{r.name}</span>
-          <span className="ml-auto pl-3 font-600 tabular-nums text-slate-900 dark:text-slate-100">
+          <span className="tabular ml-auto pl-4 font-semibold text-fg">
             {r.value}
           </span>
         </p>
@@ -163,16 +164,16 @@ export function SeverityBars({ counts }: { counts: Record<string, number> }) {
     <div className="space-y-2.5">
       {data.map((d) => (
         <div key={d.severity} className="flex items-center gap-3">
-          <span className="w-16 shrink-0 text-[12px] capitalize text-slate-600 dark:text-slate-300">
+          <span className="w-16 shrink-0 text-[12px] capitalize text-fg-muted">
             {d.severity}
           </span>
-          <div className="h-5 flex-1 overflow-hidden rounded-r-[4px] bg-[var(--plane)]">
+          <div className="h-5 flex-1 overflow-hidden rounded-r-md bg-surface-2">
             <div
-              className="h-full rounded-r-[4px]"
+              className="h-full rounded-r-md transition-[width] duration-500 ease-out"
               style={{ width: `${Math.max(3, (d.count / max) * 100)}%`, background: SEVERITY_VAR[d.severity] }}
             />
           </div>
-          <span className="w-10 shrink-0 text-right text-[12px] font-600 tabular-nums text-slate-900 dark:text-slate-100">
+          <span className="tabular w-10 shrink-0 text-right text-[12px] font-semibold text-fg">
             {d.count}
           </span>
         </div>
@@ -205,16 +206,16 @@ export function SpendBars({ data }: { data: Record<string, number> }) {
     <div className="space-y-2.5">
       {shown.map(([name, value], i) => (
         <div key={name} className="flex items-center gap-3">
-          <span className="w-28 shrink-0 truncate text-[12px] text-slate-600 dark:text-slate-300" title={name}>
+          <span className="w-28 shrink-0 truncate text-[12px] text-fg-muted" title={name}>
             {name}
           </span>
-          <div className="h-5 flex-1 overflow-hidden rounded-r-[4px] bg-[var(--plane)]">
+          <div className="h-5 flex-1 overflow-hidden rounded-r-md bg-surface-2">
             <div
-              className="h-full rounded-r-[4px]"
+              className="h-full rounded-r-md transition-[width] duration-500 ease-out"
               style={{ width: `${Math.max(3, (value / max) * 100)}%`, background: SERIES_VARS[i] }}
             />
           </div>
-          <span className="w-16 shrink-0 text-right text-[12px] font-600 tabular-nums text-slate-900 dark:text-slate-100">
+          <span className="tabular w-16 shrink-0 text-right text-[12px] font-semibold text-fg">
             {fmtUSD(value)}
           </span>
         </div>
@@ -223,11 +224,23 @@ export function SpendBars({ data }: { data: Record<string, number> }) {
   );
 }
 
-/** A tiny inline bar used inside table cells. */
-export function MiniBars({ data, color = "var(--series-1)" }: { data: number[]; color?: string }) {
+/**
+ * A tiny inline bar row for table cells and stat tiles. Decorative by
+ * contract: no axis, no labels, aria-hidden - the number it sits beside is
+ * the thing being reported, and this is only its recent shape.
+ */
+export function MiniBars({
+  data,
+  color = "var(--series-1)",
+  className,
+}: {
+  data: number[];
+  color?: string;
+  className?: string;
+}) {
   const max = Math.max(1, ...data);
   return (
-    <span className="inline-flex h-5 items-end gap-[2px]" aria-hidden>
+    <span className={cn("inline-flex h-5 items-end gap-[2px]", className)} aria-hidden>
       {data.map((v, i) => (
         <span
           key={i}

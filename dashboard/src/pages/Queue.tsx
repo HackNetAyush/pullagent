@@ -47,12 +47,31 @@ export function QueuePage() {
     refetchInterval: 10_000,
   });
 
-  const { data: status } = useQuery<AppStatus>({
+  const {
+    data: status,
+    isLoading: statusLoading,
+    error: statusError,
+  } = useQuery<AppStatus>({
     queryKey: ["app-status"],
     queryFn: api.appStatus,
     refetchInterval: 10_000,
     retry: false,
   });
+
+  /**
+   * `/api/app/*` is served by `cr app serve`, not by the plain dashboard
+   * server, so a 404 here means "this build is not running the App" rather
+   * than "something broke". Either way the answer is a sentence, not a
+   * skeleton that shimmers forever waiting for a reply that will never come.
+   */
+  const unavailable = Boolean(statusError);
+  const statusNote = (
+    <p className="text-[13px] leading-relaxed text-fg-muted">
+      The App service is not reachable from this server. Run{" "}
+      <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[12px]">cr app serve</code>{" "}
+      to see live worker and installation state.
+    </p>
+  );
 
   const columns = React.useMemo<ColumnDef<Job, any>[]>(
     () => [
@@ -61,8 +80,8 @@ export function QueuePage() {
         accessorKey: "key",
         cell: ({ row }) => (
           <div className="min-w-0">
-            <p className="truncate font-medium text-slate-900 dark:text-slate-100">{row.original.key}</p>
-            <p className="text-[12px] text-slate-500 dark:text-slate-400">
+            <p className="truncate font-medium text-fg">{row.original.key}</p>
+            <p className="text-[12px] text-fg-muted">
               {relTime(row.original.created_at)}
               {row.original.attempts > 0 && ` · ${row.original.attempts} attempt(s)`}
             </p>
@@ -92,14 +111,14 @@ export function QueuePage() {
         cell: ({ row }) =>
           row.original.error ? (
             <Tooltip label={row.original.error}>
-              <span className="line-clamp-1 max-w-sm text-[12px] text-[var(--critical)]">
+              <span className="line-clamp-1 max-w-sm text-[12px] text-critical">
                 {row.original.error}
               </span>
             </Tooltip>
           ) : row.original.status === "superseded" ? (
-            <span className="text-[12px] text-slate-400">replaced by a newer push</span>
+            <span className="text-[12px] text-fg-faint">replaced by a newer push</span>
           ) : (
-            <span className="text-slate-300 dark:text-slate-600">—</span>
+            <span className="text-fg-faint">—</span>
           ),
       },
       {
@@ -107,7 +126,7 @@ export function QueuePage() {
         accessorKey: "finished_at",
         size: 110,
         cell: ({ row }) => (
-          <span className="text-slate-500 dark:text-slate-400">{relTime(row.original.finished_at)}</span>
+          <span className="text-fg-muted">{relTime(row.original.finished_at)}</span>
         ),
       },
     ],
@@ -125,26 +144,28 @@ export function QueuePage() {
               <CardTitle>Worker</CardTitle>
               <CardDescription>In-flight and waiting right now.</CardDescription>
             </div>
-            <Server className="h-4 w-4 text-slate-400" />
+            <Server className="h-4 w-4 text-fg-faint" />
           </CardHeader>
           <CardBody className="pt-1">
-            {!status ? (
+            {unavailable ? (
+              statusNote
+            ) : statusLoading || !status ? (
               <Skeleton className="h-10" />
             ) : (
               <div className="flex items-baseline gap-4">
                 <div>
-                  <p className="font-display text-xl font-700 tabular-nums text-slate-900 dark:text-slate-50">
+                  <p className="font-display text-xl font-bold tabular text-fg">
                     {status.queue.running.length}
                   </p>
-                  <p className="text-[12px] text-slate-500 dark:text-slate-400">
+                  <p className="text-[12px] text-fg-muted">
                     running / {status.queue.concurrency} max
                   </p>
                 </div>
                 <div>
-                  <p className="font-display text-xl font-700 tabular-nums text-slate-900 dark:text-slate-50">
+                  <p className="font-display text-xl font-bold tabular text-fg">
                     {status.queue.waiting.length}
                   </p>
-                  <p className="text-[12px] text-slate-500 dark:text-slate-400">waiting</p>
+                  <p className="text-[12px] text-fg-muted">waiting</p>
                 </div>
               </div>
             )}
@@ -159,25 +180,27 @@ export function QueuePage() {
             </div>
           </CardHeader>
           <CardBody className="pt-1">
-            {!status ? (
+            {unavailable ? (
+              statusNote
+            ) : statusLoading || !status ? (
               <Skeleton className="h-10" />
             ) : status.installations.length === 0 ? (
-              <p className="text-[13px] text-slate-500 dark:text-slate-400">
+              <p className="text-[13px] text-fg-muted">
                 No installations recorded.
               </p>
             ) : (
               <div className="flex flex-wrap gap-x-6 gap-y-2">
                 {status.installations.map((i) => (
                   <div key={i.id}>
-                    <p className="text-[13px] font-600 text-slate-900 dark:text-slate-100">
+                    <p className="text-[13px] font-semibold text-fg">
                       {i.account}
                     </p>
-                    <p className="text-[12px] text-slate-500 dark:text-slate-400">
+                    <p className="text-[12px] text-fg-muted">
                       {i.repos.length} repositories ·{" "}
                       {i.suspended ? (
-                        <span className="text-[var(--warning)]">suspended</span>
+                        <span className="text-warning">suspended</span>
                       ) : (
-                        <span className="text-[var(--good)]">active</span>
+                        <span className="text-good">active</span>
                       )}
                     </p>
                   </div>

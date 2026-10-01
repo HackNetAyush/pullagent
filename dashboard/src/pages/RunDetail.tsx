@@ -41,8 +41,8 @@ function StageRail({ run }: { run: RunDetailData }) {
             className={cn(
               "rounded-md px-2 py-1 text-[11px] font-medium",
               current && "bg-[var(--series-1)] text-white",
-              done && !current && "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
-              !done && !current && "bg-slate-50 text-slate-400 dark:bg-slate-800/50 dark:text-slate-600",
+              done && !current && "bg-surface-2 text-fg-muted",
+              !done && !current && "bg-surface-2 text-fg-faint",
             )}
           >
             {stage}
@@ -64,28 +64,28 @@ function FindingCard({ f }: { f: Finding }) {
               className="h-2.5 w-2.5 rounded-[3px]"
               style={{ background: SEVERITY_VAR[f.severity] || "var(--axis)" }}
             />
-            <span className="text-[12px] font-600 capitalize text-slate-700 dark:text-slate-200">
+            <span className="text-[12px] font-semibold capitalize text-fg">
               {f.severity}
             </span>
           </span>
           <Badge>{f.category?.replace(/_/g, " ")}</Badge>
-          <span className="text-[12px] text-slate-500 dark:text-slate-400">
+          <span className="text-[12px] text-fg-muted">
             {fmtPct(f.confidence)} confidence · {f.found_by || "—"}
           </span>
           <span className="ml-auto text-[12px]">
             {f.posted ? (
-              <span className="text-[var(--good)]">posted</span>
+              <span className="text-good">posted</span>
             ) : (
-              <span className="text-slate-400">held back</span>
+              <span className="text-fg-faint">held back</span>
             )}
           </span>
         </div>
 
-        <p className="font-medium text-slate-900 dark:text-slate-100">{f.claim}</p>
-        <p className="text-[13px] leading-relaxed text-slate-600 dark:text-slate-300">
+        <p className="font-medium text-fg">{f.claim}</p>
+        <p className="text-[13px] leading-relaxed text-fg-muted">
           {f.failure_scenario}
         </p>
-        <p className="font-mono text-[11px] text-slate-400">
+        <p className="font-mono text-[11px] text-fg-faint">
           {f.file}:{f.line} · {f.fingerprint}
         </p>
       </CardBody>
@@ -109,7 +109,7 @@ export function RunDetailPage() {
     return (
       <Card>
         <CardBody className="flex items-center gap-2 text-[13px]">
-          <AlertTriangle className="h-4 w-4 text-[var(--critical)]" />
+          <AlertTriangle className="h-4 w-4 text-critical" />
           {error instanceof Error ? error.message : "Review not found."}
         </CardBody>
       </Card>
@@ -149,13 +149,13 @@ export function RunDetailPage() {
       />
 
       {data.error && (
-        <Card className="mb-3 border-[var(--critical)]/40">
+        <Card className="mb-3 border-critical/40">
           <CardBody>
-            <p className="mb-1 flex items-center gap-1.5 text-[13px] font-600 text-slate-900 dark:text-slate-100">
-              <AlertTriangle className="h-4 w-4 text-[var(--critical)]" />
+            <p className="mb-1 flex items-center gap-1.5 text-[13px] font-semibold text-fg">
+              <AlertTriangle className="h-4 w-4 text-critical" />
               Review incomplete — nothing was posted
             </p>
-            <p className="font-mono text-[12px] leading-relaxed text-slate-600 dark:text-slate-300">
+            <p className="font-mono text-[12px] leading-relaxed text-fg-muted">
               {data.error}
             </p>
           </CardBody>
@@ -186,8 +186,8 @@ export function RunDetailPage() {
                 ["Killed by verifier", fmtInt(data.killed)],
               ].map(([k, v]) => (
                 <div key={k}>
-                  <dt className="text-[12px] text-slate-500 dark:text-slate-400">{k}</dt>
-                  <dd className="font-600 tabular-nums text-slate-900 dark:text-slate-100">{v}</dd>
+                  <dt className="text-[12px] text-fg-muted">{k}</dt>
+                  <dd className="font-semibold tabular text-fg">{v}</dd>
                 </div>
               ))}
             </dl>
@@ -207,13 +207,13 @@ export function RunDetailPage() {
         </Card>
       </div>
 
-      <h2 className="mb-2 mt-5 font-display text-base font-700 text-slate-900 dark:text-slate-50">
+      <h2 className="mb-2 mt-5 font-display text-base font-bold text-fg">
         Posted findings ({posted.length})
       </h2>
       <div className="grid gap-2">
         {posted.length === 0 ? (
           <Card>
-            <CardBody className="text-[13px] text-slate-500 dark:text-slate-400">
+            <CardBody className="text-[13px] text-fg-muted">
               Nothing survived verification — a clean review.
             </CardBody>
           </Card>
@@ -231,10 +231,10 @@ export function RunDetailPage() {
 
       {held.length > 0 && (
         <>
-          <h2 className="mb-2 mt-6 font-display text-base font-700 text-slate-900 dark:text-slate-50">
+          <h2 className="mb-2 mt-6 font-display text-base font-bold text-fg">
             Held back ({held.length})
           </h2>
-          <p className="mb-2 text-[13px] text-slate-500 dark:text-slate-400">
+          <p className="mb-2 text-[13px] text-fg-muted">
             Refuted by verification, suppressed by earlier feedback, or trimmed by the comment
             budget. Shown so the filtering is auditable rather than invisible.
           </p>
@@ -246,7 +246,7 @@ export function RunDetailPage() {
         </>
       )}
 
-      <p className="mt-6 text-[12px] text-slate-400">
+      <p className="mt-6 text-[12px] text-fg-faint">
         <Link to="/runs" className="hover:underline">
           ← All reviews
         </Link>

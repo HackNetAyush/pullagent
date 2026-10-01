@@ -2,14 +2,23 @@
  * The application shell: sidebar navigation, top bar, theme toggle, account menu.
  *
  * The dashboard used to be one scrolling page. It is now routed, because the
- * questions a team asks are different shapes — "what did this cost us", "what
+ * questions a team asks are different shapes - "what did this cost us", "what
  * did it say about this repo", "why is that queued job stuck", "who is waiting
- * for access" — and stacking all of them into one column means every one of
+ * for access" - and stacking all of them into one column means every one of
  * them is buried.
+ *
+ * Scrolling belongs to the content pane, not to the document. `html`, `body`
+ * and `#root` are pinned to 100% height in theme.css and the shell is a
+ * full-height flex row, so the rail and the top bar stay put while only the
+ * pane under the header moves. The previous layout put the sidebar in normal
+ * document flow at `lg:static`, which meant a long table scrolled the
+ * navigation off the top of the screen with it.
  */
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   BadgeCheck,
+  BookOpen,
   ChevronDown,
   FolderGit2,
   Gauge,
@@ -26,6 +35,7 @@ import * as React from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { useMe } from "../auth";
+import { api, type Run } from "../lib/api";
 import { cn } from "../lib/utils";
 import {
   Badge,
@@ -33,7 +43,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
+  Tooltip,
 } from "./ui";
 
 interface NavItem {
@@ -43,15 +55,44 @@ interface NavItem {
   adminOnly?: boolean;
 }
 
-const NAV: NavItem[] = [
-  { to: "/", label: "Overview", icon: Gauge },
-  { to: "/runs", label: "Reviews", icon: Activity },
-  { to: "/findings", label: "Findings", icon: ListChecks },
-  { to: "/repos", label: "Repositories", icon: FolderGit2 },
-  { to: "/suppressions", label: "Suppressions", icon: ListFilter },
-  { to: "/queue", label: "Queue", icon: BadgeCheck },
-  { to: "/accounts", label: "Access", icon: ShieldCheck, adminOnly: true },
+/**
+ * Grouped, because seven flat links is a list to read rather than a structure
+ * to navigate. The split is by question: what happened, and what is the
+ * machine doing about it.
+ */
+const NAV: { section: string | null; items: NavItem[] }[] = [
+  {
+    section: null,
+    items: [{ to: "/", label: "Overview", icon: Gauge }],
+  },
+  {
+    section: "Activity",
+    items: [
+      { to: "/runs", label: "Reviews", icon: Activity },
+      { to: "/findings", label: "Findings", icon: ListChecks },
+      { to: "/repos", label: "Repositories", icon: FolderGit2 },
+    ],
+  },
+  {
+    section: "Operations",
+    items: [
+      { to: "/suppressions", label: "Suppressions", icon: ListFilter },
+      { to: "/queue", label: "Queue", icon: BadgeCheck },
+      { to: "/accounts", label: "Access", icon: ShieldCheck, adminOnly: true },
+    ],
+  },
 ];
+
+/** Route -> title, so the top bar can name the page without each page telling it. */
+const TITLES: Record<string, string> = {
+  "/": "Overview",
+  "/runs": "Reviews",
+  "/findings": "Findings",
+  "/repos": "Repositories",
+  "/suppressions": "Suppressions",
+  "/queue": "Queue",
+  "/accounts": "Access",
+};
 
 function useTheme() {
   const [theme, setTheme] = React.useState<"light" | "dark">(
@@ -66,6 +107,66 @@ function useTheme() {
   return { theme, toggle: () => setTheme((t) => (t === "dark" ? "light" : "dark")) };
 }
 
+/** The CR mark. A gradient tile rather than a flat square, and the one place
+ *  in the UI where brand colour is decorative. */
+function Logomark({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn(
+        "grid shrink-0 place-items-center rounded-[10px] bg-linear-to-br from-brand-400 to-brand-700",
+        "font-display text-white shadow-[0_2px_8px_-2px_color-mix(in_srgb,var(--color-brand-600)_60%,transparent)]",
+        "inset-shadow-[0_1px_0_rgba(255,255,255,.25)]",
+        className,
+      )}
+    >
+      CR
+    </div>
+  );
+}
+
+function NavRow({ item, adminBadge }: { item: NavItem; adminBadge?: boolean }) {
+  const { to, label, icon: Icon } = item;
+  return (
+    <NavLink
+      to={to}
+      end={to === "/"}
+      className={({ isActive }) =>
+        cn(
+          "group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium",
+          "transition-colors duration-150",
+          isActive
+            ? "bg-brand-500/10 text-brand-700 dark:bg-brand-500/14 dark:text-brand-200"
+            : "text-fg-muted hover:bg-surface-2 hover:text-fg",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          {/* The accent rail: a short bar on the left edge of the active row.
+              Colour alone is doing less work because the pill is there too. */}
+          <span
+            aria-hidden
+            className={cn(
+              "absolute top-1/2 -left-2.5 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-brand-500 transition-all duration-200",
+              isActive ? "opacity-100" : "scale-y-50 opacity-0",
+            )}
+          />
+          <Icon
+            className={cn(
+              "h-4 w-4 shrink-0 transition-colors",
+              isActive ? "text-brand-600 dark:text-brand-300" : "text-fg-faint group-hover:text-fg-muted",
+            )}
+          />
+          {label}
+          {adminBadge && (
+            <Badge className="ml-auto px-1 py-0 text-[9.5px] tracking-wide uppercase">admin</Badge>
+          )}
+        </>
+      )}
+    </NavLink>
+  );
+}
+
 export function Layout() {
   const { theme, toggle } = useTheme();
   const { data: me } = useMe();
@@ -75,14 +176,29 @@ export function Layout() {
   // A tapped nav link on mobile should close the drawer behind it.
   React.useEffect(() => setOpen(false), [location.pathname]);
 
-  const items = NAV.filter((n) => !n.adminOnly || me?.is_admin);
+  // Same query key the Overview uses, so this shares one poll rather than
+  // opening a second one for the same endpoint.
+  const { data: active } = useQuery<Run[]>({
+    queryKey: ["active"],
+    queryFn: api.activeRuns,
+    refetchInterval: 5_000,
+    retry: false,
+  });
+
+  const sections = NAV.map((s) => ({
+    ...s,
+    items: s.items.filter((n) => !n.adminOnly || me?.is_admin),
+  })).filter((s) => s.items.length > 0);
+
+  const title = TITLES[location.pathname] ?? (location.pathname.startsWith("/runs/") ? "Review" : "");
+  const inFlight = active?.length ?? 0;
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr]">
+    <div className="flex h-full overflow-hidden bg-plane">
       {/* Backdrop only exists on mobile, where the sidebar is a drawer. */}
       {open && (
         <div
-          className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden"
+          className="animate-fade-in fixed inset-0 z-30 bg-[#0b101b]/50 backdrop-blur-[2px] lg:hidden"
           onClick={() => setOpen(false)}
           aria-hidden
         />
@@ -90,19 +206,22 @@ export function Layout() {
 
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex w-[232px] flex-col border-r border-slate-200 bg-white",
-          "transition-transform lg:static lg:translate-x-0",
-          "dark:border-slate-800 dark:bg-[#101624]",
-          open ? "translate-x-0" : "-translate-x-full",
+          // h-full + flex-col is what keeps the rail pinned: it is a sibling of
+          // the scrolling pane, never inside it.
+          "fixed inset-y-0 left-0 z-40 flex h-full w-[264px] shrink-0 flex-col",
+          "border-r border-line bg-rail",
+          "transition-transform duration-200 ease-out lg:static lg:translate-x-0",
+          open ? "translate-x-0 shadow-lg" : "-translate-x-full",
         )}
       >
-        <div className="flex h-14 items-center gap-2 px-4">
-          <div className="grid h-7 w-7 place-items-center rounded-lg bg-brand-600 font-display text-[13px] font-700 text-white">
-            CR
+        <div className="flex h-15 shrink-0 items-center gap-2.5 px-4">
+          <Logomark className="h-8 w-8 text-[12px] font-bold" />
+          <div className="min-w-0">
+            <p className="font-display text-[14px] leading-tight font-bold text-fg">Code Review</p>
+            <p className="truncate text-[11px] leading-tight text-fg-faint">
+              {me?.login ? `@${me.login}` : "Automated PR review"}
+            </p>
           </div>
-          <span className="font-display text-[15px] font-700 text-slate-900 dark:text-slate-100">
-            Code Review
-          </span>
           <Button
             size="icon"
             variant="ghost"
@@ -114,86 +233,104 @@ export function Layout() {
           </Button>
         </div>
 
-        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5 py-2">
-          {items.map(({ to, label, icon: Icon, adminOnly }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === "/"}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
-                  isActive
-                    ? "bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-200"
-                    : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800",
-                )
-              }
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {label}
-              {adminOnly && (
-                <Badge className="ml-auto bg-slate-100 text-[10px] dark:bg-slate-800">admin</Badge>
+        {/* Only the link list scrolls, and only when the list outgrows the rail. */}
+        <nav className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
+          {sections.map((s, i) => (
+            <div key={s.section ?? "root"} className={cn(i > 0 && "mt-5")}>
+              {s.section && (
+                <p className="mb-1.5 px-2.5 text-[10.5px] font-semibold tracking-[0.08em] text-fg-faint uppercase">
+                  {s.section}
+                </p>
               )}
-            </NavLink>
+              <div className="space-y-0.5">
+                {s.items.map((item) => (
+                  <NavRow key={item.to} item={item} adminBadge={item.adminOnly} />
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
-        <div className="border-t border-slate-200 p-2.5 dark:border-slate-800">
+        <div className="shrink-0 border-t border-line p-3">
           <a
             href="https://github.com/apps"
             target="_blank"
             rel="noreferrer"
-            className="block rounded-lg px-2.5 py-2 text-[12px] text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+            className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[12.5px] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
           >
+            <BookOpen className="h-3.5 w-3.5 text-fg-faint" />
             Docs &amp; install
           </a>
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-col">
-        <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-slate-200 bg-white/85 px-4 backdrop-blur dark:border-slate-800 dark:bg-[#101624]/85">
+      <div className="flex h-full min-w-0 flex-1 flex-col">
+        <header className="flex h-15 shrink-0 items-center gap-3 border-b border-line bg-surface/80 px-4 backdrop-blur-xl sm:px-6">
           <Button
             size="icon"
             variant="ghost"
-            className="lg:hidden"
+            className="-ml-1 lg:hidden"
             onClick={() => setOpen(true)}
             aria-label="Open navigation"
           >
             <Menu className="h-4 w-4" />
           </Button>
 
-          <div className="ml-auto flex items-center gap-2">
-            <Button size="icon" variant="ghost" onClick={toggle} aria-label="Toggle theme">
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </Button>
+          <h2 className="truncate font-display text-[15px] font-bold text-fg">{title}</h2>
+
+          {/* "Is it working right now" belongs in the chrome, not only on the
+              overview - it is the one fact worth knowing on every page. */}
+          {inFlight > 0 && (
+            <Tooltip label={`${inFlight} review${inFlight === 1 ? "" : "s"} running right now`}>
+              <span className="hidden items-center gap-1.5 rounded-full border border-line bg-surface-2 py-1 pr-2.5 pl-2 text-[12px] text-fg-muted sm:inline-flex">
+                <span
+                  aria-hidden
+                  className="animate-pulse-ring h-1.5 w-1.5 rounded-full"
+                  style={{ background: "var(--series-1)" }}
+                />
+                {inFlight} in flight
+              </span>
+            </Tooltip>
+          )}
+
+          <div className="ml-auto flex items-center gap-1.5">
+            <Tooltip label={theme === "dark" ? "Switch to light" : "Switch to dark"}>
+              <Button size="icon" variant="ghost" onClick={toggle} aria-label="Toggle theme">
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </Button>
+            </Tooltip>
 
             {me?.signed_in ? (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-slate-100 dark:hover:bg-slate-800">
+                  <button className="flex items-center gap-2 rounded-lg py-1 pr-1.5 pl-1 transition-colors hover:bg-surface-2">
                     {me.avatar_url ? (
-                      <img src={me.avatar_url} alt="" className="h-6 w-6 rounded-full" />
+                      <img
+                        src={me.avatar_url}
+                        alt=""
+                        className="h-7 w-7 rounded-full ring-1 ring-line"
+                      />
                     ) : (
-                      <span className="grid h-6 w-6 place-items-center rounded-full bg-brand-600 text-[11px] font-600 text-white">
+                      <span className="grid h-7 w-7 place-items-center rounded-full bg-linear-to-br from-brand-400 to-brand-700 text-[11px] font-semibold text-white">
                         {me.login?.[0]?.toUpperCase()}
                       </span>
                     )}
-                    <span className="hidden text-[13px] text-slate-700 sm:block dark:text-slate-200">
+                    <span className="hidden text-[13px] font-medium text-fg sm:block">
                       {me.login}
                     </span>
-                    <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+                    <ChevronDown className="h-3.5 w-3.5 text-fg-faint" />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent>
-                  <div className="px-2.5 py-1.5">
-                    <p className="text-[13px] font-600 text-slate-900 dark:text-slate-100">
-                      {me.name || me.login}
-                    </p>
-                    <p className="text-[12px] text-slate-500 dark:text-slate-400">
+                  <div className="px-2.5 py-2">
+                    <p className="text-[13px] font-semibold text-fg">{me.name || me.login}</p>
+                    <p className="mt-0.5 text-[12px] text-fg-muted">
                       {me.is_admin ? "Administrator" : "Member"}
                     </p>
                   </div>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem
+                    className="text-critical data-[highlighted]:text-critical"
                     onSelect={async () => {
                       await fetch("/auth/logout", { method: "POST" });
                       window.location.assign("/");
@@ -205,15 +342,23 @@ export function Layout() {
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : me?.sign_in_configured ? (
-              <Button variant="primary" size="sm" onClick={() => window.location.assign("/auth/login")}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => window.location.assign("/auth/login")}
+              >
                 Sign in
               </Button>
             ) : null}
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6">
-          <Outlet />
+        {/* The one scrolling region in the app. `key` restarts the entrance
+            animation on navigation so a route change reads as a change. */}
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div key={location.pathname} className="animate-fade-up mx-auto max-w-[1500px] px-4 py-6 sm:px-6">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>
@@ -230,14 +375,18 @@ export function PageHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <h1 className="font-display text-xl font-700 text-slate-900 dark:text-slate-50">{title}</h1>
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+      <div className="min-w-0">
+        <h1 className="font-display text-[26px] leading-tight font-bold tracking-[-0.02em] text-fg">
+          {title}
+        </h1>
         {description && (
-          <p className="mt-0.5 text-[13px] text-slate-500 dark:text-slate-400">{description}</p>
+          <p className="mt-1.5 max-w-2xl text-[13.5px] leading-relaxed text-fg-muted">
+            {description}
+          </p>
         )}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   );
 }

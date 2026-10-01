@@ -1,35 +1,48 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Plus+Jakarta+Sans:wght@500..800&family=JetBrains+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-@theme {
-  --font-sans: "DM Sans", "Segoe UI", sans-serif;
-  --font-display: "Manrope", "DM Sans", sans-serif;
-  --color-brand-50: #f0f0ff;
-  --color-brand-100: #e4e4ff;
-  --color-brand-200: #cfcff8;
-  --color-brand-500: #6464dc;
-  --color-brand-600: #5555c8;
-  --color-brand-700: #4545ad;
-}
-
 /* ---------------------------------------------------------------------------
-   Chart palette.
-   Every value below is validated, not chosen by eye — `validate_palette.js`
-   was run against the exact surfaces these render on (#ffffff cards in light,
-   #151b28 in dark) and each set passes the lightness band, chroma floor,
-   CVD separation, normal-vision floor and contrast checks.
+   Design tokens.
 
-   These tokens previously did not exist at all: `api.ts` referenced --ord-1
-   and --series-1, nothing defined them, and every severity and status colour
-   silently resolved to nothing.
+   Surface, line and text values are declared as plain custom properties on
+   :root and re-declared under [data-theme="dark"], then aliased into Tailwind's
+   @theme. The indirection is deliberate: `bg-surface` compiles to
+   `var(--color-surface)` -> `var(--surface)`, which resolves per element at
+   computed-value time, so one class name follows the theme instead of every
+   component carrying a hand-written `dark:bg-[#151b28]` twin.
    --------------------------------------------------------------------------- */
-:root {
-  --surface: #ffffff;
-  --plane: #f6f7fb;
 
-  /* Categorical — fixed order, never cycled. Slots 3 and 4 sit below 3:1 on
+:root {
+  /* Surfaces, furthest back to nearest front. */
+  --plane: #f4f6fb;          /* app background behind everything */
+  --surface: #ffffff;        /* cards, menus, popovers */
+  --surface-2: #f3f5f9;      /* inset wells, track fills, hovered rows */
+  --surface-3: #e9edf4;      /* pressed / stronger inset */
+  --rail: #ffffff;           /* sidebar */
+
+  --line: #e5e9f0;           /* hairlines between things */
+  --line-strong: #d3d9e4;    /* borders that must be seen */
+
+  --fg: #101828;             /* primary text */
+  --fg-muted: #5b6577;       /* secondary text */
+  --fg-faint: #919cb0;       /* tertiary text, placeholders */
+
+  /* Elevation: a tight contact shadow plus a soft spread, never one blur. */
+  --elev-1: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --elev-2: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --elev-3: 0 2px 4px rgba(16, 24, 40, 0.04), 0 8px 16px -4px rgba(16, 24, 40, 0.08);
+  --elev-4: 0 4px 6px rgba(16, 24, 40, 0.03), 0 16px 32px -8px rgba(16, 24, 40, 0.12);
+
+  /* ------------------------------------------------------------------------
+     Chart palette.
+     Every value below is validated, not chosen by eye - `validate_palette.js`
+     was run against the exact surfaces these render on, and each set passes
+     the lightness band, chroma floor, CVD separation and contrast checks.
+     ------------------------------------------------------------------------ */
+
+  /* Categorical - fixed order, never cycled. Slots 3 and 4 sit below 3:1 on
      white, so any chart using them ships direct labels or the table view. */
   --series-1: #2a78d6;
   --series-2: #eb6834;
@@ -38,14 +51,13 @@
   --series-5: #e87ba4;
   --series-6: #008300;
 
-  /* Severity is an ordered scale, not four identities: one hue, dark = worse.
-     Validated with --ordinal; the light end clears 2:1 against the surface. */
+  /* Severity is an ordered scale, not four identities: one hue, dark = worse. */
   --sev-critical: #184f95;
   --sev-high: #2a78d6;
   --sev-medium: #5598e7;
   --sev-low: #86b6ef;
 
-  /* Reserved status palette — never reused as a series colour, and always
+  /* Reserved status palette - never reused as a series colour, and always
      shipped beside an icon or a text label so hue is never load-bearing. */
   --good: #0ca30c;
   --warning: #fab219;
@@ -57,11 +69,28 @@
 }
 
 :root[data-theme="dark"] {
-  --surface: #151b28;
-  --plane: #0d111b;
+  --plane: #080b12;
+  --surface: #111725;
+  --surface-2: #171f30;
+  --surface-3: #1e273b;
+  --rail: #0b101b;
+
+  --line: #1e2637;
+  --line-strong: #2b3549;
+
+  --fg: #e9eef8;
+  --fg-muted: #9aa5b9;
+  --fg-faint: #6a7589;
+
+  /* Dark needs more spread and less opacity than a light drop shadow, or the
+     card reads as a smudge rather than as something lifted off the plane. */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --elev-2: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --elev-3: 0 2px 4px rgba(0, 0, 0, 0.3), 0 8px 20px -4px rgba(0, 0, 0, 0.5);
+  --elev-4: 0 4px 8px rgba(0, 0, 0, 0.3), 0 20px 40px -8px rgba(0, 0, 0, 0.6);
 
   /* Not an automatic flip: the same six hues re-stepped for the dark surface
-     and validated as a set against #151b28. */
+     and validated as a set against the card colour. */
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-3: #199e70;
@@ -74,39 +103,121 @@
   --sev-medium: #3987e5;
   --sev-low: #184f95;
 
-  --good: #0ca30c;
+  --good: #2fbf4f;
   --warning: #fab219;
   --serious: #ec835a;
-  --critical: #d03b3b;
+  --critical: #e05656;
 
-  --grid: #232c3e;
+  --grid: #212a3c;
   --axis: #6b7689;
+}
+
+@theme inline {
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Theme-following aliases - see the note above on why these are indirect. */
+  --color-plane: var(--plane);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-rail: var(--rail);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-serious: var(--serious);
+
+  --color-brand-50: #eef1ff;
+  --color-brand-100: #e0e5ff;
+  --color-brand-200: #c5cdff;
+  --color-brand-300: #a2a9fc;
+  --color-brand-400: #8287f7;
+  --color-brand-500: #6a68ee;
+  --color-brand-600: #5a51e0;
+  --color-brand-700: #4b41c2;
+  --color-brand-800: #3e379c;
+  --color-brand-900: #35317c;
+
+  /* Tailwind's shadow scale, pointed at the theme-following elevation values
+     above so `shadow-sm` is one class rather than a light/dark pair. */
+  --shadow-xs: var(--elev-1);
+  --shadow-sm: var(--elev-2);
+  --shadow-md: var(--elev-3);
+  --shadow-lg: var(--elev-4);
 }
 
 @layer base {
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
+
+  html {
+    /* The shell owns scrolling, not the document - see Layout.tsx. Without a
+       fixed-height html/body the sidebar scrolls away with the page. */
+    height: 100%;
+  }
+
   body {
     margin: 0;
+    height: 100%;
     min-width: 320px;
-    min-height: 100vh;
-    overflow-x: hidden;
+    overflow: hidden;
     background: var(--plane);
-    color: #172033;
+    color: var(--fg);
     font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
-  [data-theme="dark"] body { color: #e8ecf4; }
+
+  #root { height: 100%; }
+
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.015em;
+  }
+
   button { cursor: pointer; }
   button:disabled { cursor: default; }
 
-  /* Focus is never removed, only restyled — keyboard users need to see it. */
+  ::selection {
+    background: color-mix(in srgb, var(--color-brand-500) 24%, transparent);
+  }
+
+  /* Focus is never removed, only restyled - keyboard users need to see it. */
   :focus-visible {
     outline: 2px solid var(--color-brand-500);
     outline-offset: 2px;
-    border-radius: 4px;
+    border-radius: 6px;
+  }
+
+  /* Scrollbars, styled so a scrolling panel inside the shell does not slam a
+     stock grey gutter through the middle of the layout. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-faint);
+    background-clip: padding-box;
   }
 }
+
+/* --- motion --------------------------------------------------------------- */
 
 @keyframes shimmer {
   from { background-position: 100% 0; }
@@ -114,16 +225,74 @@
 }
 
 @keyframes fade-up {
-  from { opacity: 0; transform: translateY(4px); }
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
 }
 
-.animate-fade-up { animation: fade-up .22s ease-out both; }
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(.97) translateY(-2px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--series-1) 50%, transparent); }
+  70% { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.animate-fade-up { animation: fade-up .26s cubic-bezier(.22,.8,.3,1) both; }
+.animate-fade-in { animation: fade-in .2s ease-out both; }
+.animate-pop-in { animation: pop-in .14s cubic-bezier(.22,.8,.3,1) both; }
+.animate-pulse-ring { animation: pulse-ring 1.8s ease-out infinite; }
+
+/* Staggered entrance for grids of cards - the page assembles rather than
+   snapping in at once. Capped at six; past that the delay reads as lag. */
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; }
+.stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; }
+.stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(6) { animation-delay: 200ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* --- pieces --------------------------------------------------------------- */
 
 .skeleton {
-  background: linear-gradient(90deg, var(--grid) 25%, var(--surface) 50%, var(--grid) 75%);
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    color-mix(in srgb, var(--surface-2) 45%, var(--surface)) 50%,
+    var(--surface-2) 75%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
 }
+
+/* The faint grid the page header sits on. Two hairline gradients rather than
+   an image, so it costs nothing and follows the theme. */
+.plane-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--line) 60%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--line) 60%, transparent) 1px, transparent 1px);
+  background-size: 34px 34px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 10%, transparent 75%);
+}
+
+/* Numbers that poll must not jitter as their width changes. */
+.tabular { font-variant-numeric: tabular-nums; }
 
 /* Recharts draws its own focus ring on every segment; ours is enough. */
 .recharts-wrapper:focus,

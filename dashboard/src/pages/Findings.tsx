@@ -1,12 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Search } from "lucide-react";
+
 import * as React from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { DataTable, useTableParams } from "../components/DataTable";
 import { FilterBar, PageHeader } from "../components/Layout";
-import { Badge, Card, Input, Select, Tooltip } from "../components/ui";
+import { Badge, Card, SearchInput, Select, Tooltip } from "../components/ui";
 import { api, type Finding, type Page } from "../lib/api";
 import { SEVERITY_ORDER, SEVERITY_VAR, fmtPct } from "../lib/utils";
 
@@ -28,7 +28,7 @@ function Severity({ value }: { value: string }) {
         className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
         style={{ background: SEVERITY_VAR[value] || "var(--axis)" }}
       />
-      <span className="text-[12px] capitalize text-slate-700 dark:text-slate-300">{value}</span>
+      <span className="text-[12px] capitalize text-fg-muted">{value}</span>
     </span>
   );
 }
@@ -75,11 +75,11 @@ export function FindingsPage() {
         cell: ({ row }) => (
           <div className="min-w-0 max-w-xl">
             <Tooltip label={row.original.failure_scenario}>
-              <p className="truncate font-medium text-slate-900 dark:text-slate-100">
+              <p className="truncate font-medium text-fg">
                 {row.original.claim}
               </p>
             </Tooltip>
-            <p className="truncate text-[12px] text-slate-500 dark:text-slate-400">
+            <p className="truncate text-[12px] text-fg-muted">
               {row.original.file}:{row.original.line} · found by {row.original.found_by || "—"}
             </p>
           </div>
@@ -101,7 +101,7 @@ export function FindingsPage() {
         header: "Confidence",
         accessorKey: "confidence",
         size: 100,
-        cell: ({ row }) => <span className="tabular-nums">{fmtPct(row.original.confidence)}</span>,
+        cell: ({ row }) => <span className="tabular">{fmtPct(row.original.confidence)}</span>,
       },
       {
         header: "Posted",
@@ -109,9 +109,9 @@ export function FindingsPage() {
         size: 90,
         cell: ({ row }) =>
           row.original.posted ? (
-            <span className="text-[var(--good)]">posted</span>
+            <span className="text-good">posted</span>
           ) : (
-            <span className="text-slate-400">held back</span>
+            <span className="text-fg-faint">held back</span>
           ),
       },
       {
@@ -141,15 +141,12 @@ export function FindingsPage() {
       />
 
       <FilterBar>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search claims…"
-            className="w-64 pl-8"
-          />
-        </div>
+        <SearchInput
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search claims…"
+          wrapperClassName="w-64"
+        />
         <Select
           value={t.get("severity")}
           onChange={(v) => t.setFilter("severity", v)}

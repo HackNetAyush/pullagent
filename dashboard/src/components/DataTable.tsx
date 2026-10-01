@@ -31,7 +31,7 @@ export interface DataTableProps<T> {
   onRowClick?: (row: T) => void;
   emptyTitle?: string;
   emptyHint?: string;
-  /** Row identity for React keys — index is wrong when a page shifts. */
+  /** Row identity for React keys - index is wrong when a page shifts. */
   rowId: (row: T) => string | number;
 }
 
@@ -63,17 +63,31 @@ export function DataTable<T>({
   if (error) return <ErrorState error={error} onRetry={onRetry} />;
 
   return (
-    <div>
-      {/* The table scrolls inside its own box; the page never scrolls sideways. */}
-      <div className="overflow-x-auto">
+    <div className="relative">
+      {/* A refetch dims the rows instead of swapping them for skeletons - the
+          old page stays readable while the next one is in the air. */}
+      {loading && data.length > 0 && (
+        <div className="absolute inset-x-0 top-0 z-20 h-0.5 overflow-hidden rounded-t-2xl">
+          <div className="skeleton h-full w-full" />
+        </div>
+      )}
+
+      {/* The table scrolls inside its own box, so the page never scrolls
+          sideways and the pager below stays reachable without scrolling to the
+          bottom of a hundred rows. max-height only bites once the page is
+          genuinely long; a short table is laid out exactly as before. */}
+      <div className="max-h-[70vh] min-h-0 overflow-auto">
         <table className="w-full border-collapse text-left">
-          <thead>
+          <thead className="sticky top-0 z-10">
             {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id} className="border-b border-slate-200 dark:border-slate-700/70">
+              <tr key={hg.id}>
                 {hg.headers.map((h) => (
                   <th
                     key={h.id}
-                    className="whitespace-nowrap px-4 py-2.5 text-[11px] font-600 uppercase tracking-wide text-slate-500 dark:text-slate-400"
+                    // The header is sticky, so it needs its own opaque
+                    // background and its own bottom hairline - a border on a
+                    // sticky <tr> does not paint in every browser.
+                    className="border-b border-line bg-surface px-4 py-2.5 text-[11px] font-semibold tracking-[0.05em] text-fg-faint uppercase"
                     style={{ width: h.column.columnDef.size }}
                   >
                     {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
@@ -82,13 +96,13 @@ export function DataTable<T>({
               </tr>
             ))}
           </thead>
-          <tbody>
+          <tbody className={cn("transition-opacity", loading && data.length > 0 && "opacity-60")}>
             {loading && data.length === 0
               ? Array.from({ length: Math.min(limit, 8) }).map((_, i) => (
-                  <tr key={i} className="border-b border-slate-100 dark:border-slate-800">
+                  <tr key={i} className="border-b border-line/70">
                     {columns.map((_c, j) => (
-                      <td key={j} className="px-4 py-3">
-                        <Skeleton className="h-4 w-full" />
+                      <td key={j} className="px-4 py-3.5">
+                        <Skeleton className="h-3.5 w-full" />
                       </td>
                     ))}
                   </tr>
@@ -106,12 +120,13 @@ export function DataTable<T>({
                         : undefined
                     }
                     className={cn(
-                      "border-b border-slate-100 last:border-0 dark:border-slate-800",
-                      onRowClick && "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50",
+                      "border-b border-line/70 transition-colors last:border-0",
+                      onRowClick &&
+                        "cursor-pointer hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none",
                     )}
                   >
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} className="px-4 py-2.5 align-middle text-[13px]">
+                      <td key={cell.id} className="px-4 py-3 align-middle text-[13px] text-fg-muted">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}
@@ -125,14 +140,23 @@ export function DataTable<T>({
         <EmptyState icon={Inbox} title={emptyTitle} hint={emptyHint} />
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-2.5 dark:border-slate-700/70">
-        <p className="text-[12px] text-slate-500 dark:text-slate-400">
-          {total === 0 ? "No rows" : `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-2.5">
+        <p className="text-[12px] text-fg-muted">
+          {total === 0 ? (
+            "No rows"
+          ) : (
+            <>
+              <span className="tabular font-medium text-fg">
+                {from.toLocaleString()}–{to.toLocaleString()}
+              </span>{" "}
+              of <span className="tabular">{total.toLocaleString()}</span>
+            </>
+          )}
         </p>
 
         <div className="flex items-center gap-3">
           {onLimitChange && (
-            <label className="flex items-center gap-1.5 text-[12px] text-slate-500 dark:text-slate-400">
+            <label className="flex items-center gap-1.5 text-[12px] text-fg-muted">
               Rows
               <select
                 value={limit}
@@ -140,7 +164,7 @@ export function DataTable<T>({
                   onLimitChange(Number(e.target.value));
                   onOffsetChange(0);
                 }}
-                className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-[12px] dark:border-slate-700 dark:bg-[#0f1523]"
+                className="h-7 rounded-md border border-line bg-surface px-1.5 text-[12px] text-fg transition-colors hover:border-line-strong"
               >
                 {PAGE_SIZES.map((n) => (
                   <option key={n} value={n}>
@@ -161,7 +185,7 @@ export function DataTable<T>({
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="min-w-20 text-center text-[12px] tabular-nums text-slate-500 dark:text-slate-400">
+            <span className="tabular min-w-20 text-center text-[12px] text-fg-muted">
               {page} / {pages}
             </span>
             <Button
@@ -189,7 +213,7 @@ export function useTableParams(search: URLSearchParams, set: (next: URLSearchPar
   const update = (patch: Record<string, string | number | undefined>) => {
     const next = new URLSearchParams(search);
     for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined || v === "" ) next.delete(k);
+      if (v === undefined || v === "") next.delete(k);
       else next.set(k, String(v));
     }
     set(next);
@@ -201,7 +225,7 @@ export function useTableParams(search: URLSearchParams, set: (next: URLSearchPar
     get: (k: string) => search.get(k) || "",
     setOffset: (o: number) => update({ offset: o || undefined }),
     setLimit: (l: number) => update({ limit: l, offset: undefined }),
-    /** Changing any filter resets to page one — staying on page 7 of a
+    /** Changing any filter resets to page one - staying on page 7 of a
      *  result set that now has two pages shows an empty table. */
     setFilter: (k: string, v: string) => update({ [k]: v || undefined, offset: undefined }),
   };
