@@ -355,6 +355,7 @@ def build_review(
     cost: float,
     elapsed: float,
     killed: int,
+    attribution: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     """Split findings into inline comments and a summary body.
 
@@ -414,6 +415,11 @@ def build_review(
             lines.append(f"\n**Suggested fix:** {f.suggested_fix}\n")
         lines.append(f"\n<!-- cr:{f.fingerprint()} -->\n")
 
+    if attribution:
+        # A review on the customer's own keys says which of their models wrote
+        # it, so its quality is read against their model choice and its cost
+        # against their bill, not CR's.
+        lines.append(f"\n<sub>{attribution}</sub>\n")
     lines.append(
         f"\n<sub>tier `{tier}` · {killed} finding(s) killed by verification · "
         f"${cost:.4f} · {elapsed:.0f}s</sub>"

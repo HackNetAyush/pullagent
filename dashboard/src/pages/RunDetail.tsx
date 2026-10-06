@@ -131,7 +131,7 @@ export function RunDetailPage() {
 
       <PageHeader
         title={`${data.repo}${data.pr ? ` #${data.pr}` : ""}`}
-        description={`${data.tier} · ${data.model} · started ${relTime(data.started_at)}`}
+        description={`${data.billing === "byok" ? "Your API keys" : data.tier} · ${data.model} · started ${relTime(data.started_at)}`}
         actions={
           data.pr ? (
             <a

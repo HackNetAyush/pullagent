@@ -12,14 +12,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import desc, func, select
 
+from cr.app.workspace_routes import Scope, workspace_scope
+from cr.app.workspace_routes import router as workspace_router
 from cr.config import TIERS, settings
-from cr.llm.client import RATES
+from cr.llm.registry import PROVIDERS
 from cr.store import db as store
 from cr.store.models import FindingRow, PRState, Run, Suppression
 
@@ -93,7 +95,9 @@ def _run_json(r: Run) -> dict[str, Any]:
         "repo": r.repo,
         "pr": r.pr_number,
         "tier": r.tier,
-        "model": r.model,
+        # A customer connection's reference reads as its own model name.
+        "model": r.model.split(":", 2)[2] if r.model.startswith("conn:") else r.model,
+        "billing": r.billing or "managed",
         "source": r.source,
         "actor": r.actor or "",
         "status": "stalled" if stalled else r.status,
@@ -122,13 +126,15 @@ def health() -> dict[str, Any]:
 
 
 @api.get("/api/overview")
-def overview(days: int = 30) -> dict[str, Any]:
+def overview(days: int = 30, sc: Scope = Depends(workspace_scope)) -> dict[str, Any]:
     since = datetime.now(UTC) - timedelta(days=days)
     # Everything must be materialised inside the session: ORM attributes cannot
     # be refreshed once it closes (DetachedInstanceError).
     with store.session() as s:
         runs = list(
-            s.execute(select(Run).where(Run.created_at >= since.replace(tzinfo=None))).scalars()
+            s.execute(
+                select(Run).where(Run.created_at >= since.replace(tzinfo=None), *sc.runs())
+            ).scalars()
         )
         done = [r for r in runs if r.status == "done"]
         active = sum(1 for r in runs if r.status == "running")
@@ -141,21 +147,50 @@ def overview(days: int = 30) -> dict[str, Any]:
         cache_all = cache_read + sum(r.cache_write_tokens + r.input_tokens for r in done)
 
         n_sup, sup_hits = s.execute(
-            select(func.count(Suppression.id), func.sum(Suppression.hits))
+            select(func.count(Suppression.id), func.sum(Suppression.hits)).where(
+                *sc.repo(Suppression.repo)
+            )
         ).one()
 
         by_day: dict[str, dict[str, float]] = {}
         for r in done:
             key = (r.created_at or datetime.now(UTC)).date().isoformat()
-            d = by_day.setdefault(key, {"cost": 0.0, "runs": 0, "posted": 0})
+            d = by_day.setdefault(
+                key, {"cost": 0.0, "managed": 0.0, "byok": 0.0, "runs": 0, "posted": 0}
+            )
             d["cost"] += r.cost_usd
+            # Spend on CR's credits and on customers' own keys are different
+            # money; the trend shows them as separate lines.
+            d["byok" if r.billing == "byok" else "managed"] += r.cost_usd
             d["runs"] += 1
             d["posted"] += r.posted
+
+        byok_runs = [r for r in done if r.billing == "byok"]
+        byok_by_model: dict[str, dict[str, Any]] = {}
+        for r in byok_runs:
+            for mc in r.model_costs or []:
+                provider = mc.get("provider") or ""
+                name = mc.get("label") or mc.get("model") or "unknown"
+                key = f"{name} · {PROVIDERS[provider].label}" if provider in PROVIDERS else name
+                row = byok_by_model.setdefault(
+                    key,
+                    {
+                        "label": key,
+                        "cost": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "priced": True,
+                    },
+                )
+                row["cost"] += float(mc.get("cost_usd") or 0.0)
+                row["input_tokens"] += int(mc.get("input_tokens") or 0)
+                row["output_tokens"] += int(mc.get("output_tokens") or 0)
+                row["priced"] = row["priced"] and bool(mc.get("priced", True))
 
         severity = dict(
             s.execute(
                 select(FindingRow.severity, func.count(FindingRow.id))
-                .where(FindingRow.was_posted == 1)
+                .where(FindingRow.was_posted == 1, *sc.repo(FindingRow.repo))
                 .group_by(FindingRow.severity)
             ).all()
         )
@@ -163,10 +198,11 @@ def overview(days: int = 30) -> dict[str, Any]:
         for r in done:
             by_source[r.source] = round(by_source.get(r.source, 0.0) + r.cost_usd, 4)
 
+        # CR-credit spend only: customers' own models are reported separately.
         by_model = dict(
             s.execute(
                 select(Run.model, func.sum(Run.cost_usd))
-                .where(Run.status == "done")
+                .where(Run.status == "done", Run.billing != "byok", *sc.runs())
                 .group_by(Run.model)
             ).all()
         )
@@ -196,6 +232,15 @@ def overview(days: int = 30) -> dict[str, Any]:
             "severity": severity,
             "cost_by_model": {k: round(v, 4) for k, v in by_model.items()},
             "cost_by_source": by_source,
+            "byok": {
+                "cost": round(sum(r.cost_usd for r in byok_runs), 4),
+                "runs": len(byok_runs),
+                "by_model": sorted(
+                    ({**v, "cost": round(v["cost"], 4)} for v in byok_by_model.values()),
+                    key=lambda v: v["cost"],
+                    reverse=True,
+                ),
+            },
         }
 
 
@@ -208,11 +253,12 @@ def runs(
     source: str | None = None,
     tier: str | None = None,
     q: str | None = None,
+    sc: Scope = Depends(workspace_scope),
 ) -> dict[str, Any]:
     """One page of runs, newest first, with the total behind it."""
     limit, offset = _bounds(limit, offset)
     with store.session() as s:
-        where = []
+        where = sc.runs()
         if repo:
             where.append(Run.repo == repo)
         if status:
@@ -232,12 +278,13 @@ def runs(
 
 
 @api.get("/api/runs/facets")
-def run_facets() -> dict[str, list[str]]:
+def run_facets(sc: Scope = Depends(workspace_scope)) -> dict[str, list[str]]:
     """Distinct values for the filter dropdowns, so the UI never guesses."""
     with store.session() as s:
 
         def distinct(col) -> list[str]:
-            return sorted(v for (v,) in s.execute(select(col).distinct()).all() if v)
+            q = select(col).where(*sc.runs()).distinct()
+            return sorted(v for (v,) in s.execute(q).all() if v)
 
         return {
             "repos": distinct(Run.repo),
@@ -248,17 +295,23 @@ def run_facets() -> dict[str, list[str]]:
 
 
 @api.get("/api/runs/active")
-def active_runs() -> list[dict[str, Any]]:
+def active_runs(sc: Scope = Depends(workspace_scope)) -> list[dict[str, Any]]:
     with store.session() as s:
-        q = select(Run).where(Run.status == "running").order_by(desc(Run.id))
+        q = select(Run).where(Run.status == "running", *sc.runs()).order_by(desc(Run.id))
         return [_run_json(r) for r in s.execute(q).scalars()]
 
 
 @api.get("/api/runs/{run_id}")
-def run_detail(run_id: int) -> dict[str, Any]:
+def run_detail(run_id: int, request: Request) -> dict[str, Any]:
+    from cr.app import workspace as ws
+    from cr.app.workspace_routes import actor
+
+    who = actor(request)
     with store.session() as s:
         r = s.get(Run, run_id)
-        if r is None:
+        # Someone else's run is "not found", not "forbidden": its existence is
+        # not ours to confirm.
+        if r is None or not ws.can_view(who, r.account or r.repo.split("/", 1)[0]):
             raise HTTPException(404, "run not found")
         findings = s.execute(select(FindingRow).where(FindingRow.run_id == run_id)).scalars()
         return {
@@ -289,10 +342,11 @@ def suppressions(
     repo: str | None = None,
     reason: str | None = None,
     q: str | None = None,
+    sc: Scope = Depends(workspace_scope),
 ) -> dict[str, Any]:
     limit, offset = _bounds(limit, offset)
     with store.session() as s:
-        where = []
+        where = sc.repo(Suppression.repo)
         if repo:
             where.append(Suppression.repo == repo)
         if reason:
@@ -338,12 +392,13 @@ def findings(
     category: str | None = None,
     posted: bool | None = None,
     q: str | None = None,
+    sc: Scope = Depends(workspace_scope),
 ) -> dict[str, Any]:
     """Findings across every run — the view that answers "what does CR
     actually say about my code", which a per-run list cannot."""
     limit, offset = _bounds(limit, offset)
     with store.session() as s:
-        where = []
+        where = sc.repo(FindingRow.repo)
         if repo:
             where.append(FindingRow.repo == repo)
         if severity:
@@ -392,11 +447,16 @@ def findings(
 
 
 @api.get("/api/repos")
-def repos(limit: int = DEFAULT_LIMIT, offset: int = 0, q: str | None = None) -> dict[str, Any]:
+def repos(
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    q: str | None = None,
+    sc: Scope = Depends(workspace_scope),
+) -> dict[str, Any]:
     """Per-repository rollup: the unit a team actually thinks in."""
     limit, offset = _bounds(limit, offset)
     with store.session() as s:
-        where = [Run.repo.ilike(f"%{q}%")] if q else []
+        where = [*sc.runs(), *([Run.repo.ilike(f"%{q}%")] if q else [])]
         agg = (
             select(
                 Run.repo.label("repo"),
@@ -415,11 +475,17 @@ def repos(limit: int = DEFAULT_LIMIT, offset: int = 0, q: str | None = None) -> 
 
         sup = dict(
             s.execute(
-                select(Suppression.repo, func.count(Suppression.id)).group_by(Suppression.repo)
+                select(Suppression.repo, func.count(Suppression.id))
+                .where(*sc.repo(Suppression.repo))
+                .group_by(Suppression.repo)
             ).all()
         )
         prs = dict(
-            s.execute(select(PRState.repo, func.count(PRState.id)).group_by(PRState.repo)).all()
+            s.execute(
+                select(PRState.repo, func.count(PRState.id))
+                .where(*sc.repo(PRState.repo))
+                .group_by(PRState.repo)
+            ).all()
         )
         return page(
             [
@@ -458,11 +524,11 @@ def me() -> dict[str, Any]:
 
 @api.get("/api/config")
 def config() -> dict[str, Any]:
+    """The managed presets by behaviour only. Which provider and models serve
+    them is deployment detail and is not exposed to the dashboard."""
     return {
-        "provider": settings.provider,
         "tiers": {
             name: {
-                "model": t.model,
                 "effort": t.effort,
                 "finders": t.finders,
                 "verifiers": t.verifier_lenses,
@@ -470,11 +536,11 @@ def config() -> dict[str, Any]:
             }
             for name, t in TIERS.items()
         },
-        "rates": RATES,
     }
 
 
 app.include_router(api)
+app.include_router(workspace_router)
 
 
 def mount_ui(app_: FastAPI, dist: Path) -> None:
@@ -490,22 +556,33 @@ def mount_ui(app_: FastAPI, dist: Path) -> None:
     """
     if not dist.is_dir():
         return
-    app_.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+    root = dist.resolve()
+    app_.mount("/assets", StaticFiles(directory=root / "assets"), name="assets")
 
     @app_.get("/{path:path}")
-    def spa(path: str) -> FileResponse:
+    def spa(path: str) -> Response:
         # Client-side routes get index.html; unknown API routes must 404 as
         # JSON. Without this an unmatched /api/* returns the SPA shell with a
         # 200 and the caller reports a JSON parse error instead of a 404.
         if path.startswith(("api/", "auth/", "webhook")):
             raise HTTPException(status_code=404, detail=f"no such endpoint: /{path}")
-        candidate = dist / path
-        if path and candidate.is_file():
+        # The path is the client's, and nothing between it and here removes
+        # `..`: a client that does not normalise URLs (curl --path-as-is) could
+        # otherwise read any file this process can, secrets included. Only
+        # files inside the build directory are served.
+        candidate = (root / path).resolve()
+        if path and candidate.is_relative_to(root) and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(
-            dist / "index.html",
-            headers={"Cache-Control": "no-cache, must-revalidate"},
-        )
+        index = root / "index.html"
+        if not index.is_file():
+            # A build in progress empties the directory first. Say so, rather
+            # than failing every request with a stack trace until it finishes.
+            return PlainTextResponse(
+                "The dashboard is being rebuilt. Refresh in a few seconds.",
+                status_code=503,
+                headers={"Retry-After": "5", "Cache-Control": "no-store"},
+            )
+        return FileResponse(index, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 _DIST = Path(

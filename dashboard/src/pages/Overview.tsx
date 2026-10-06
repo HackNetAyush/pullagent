@@ -26,6 +26,7 @@ import {
 } from "../components/ui";
 import { api, type Overview as OverviewData, type Run } from "../lib/api";
 import { cn, fmtInt, fmtPct, fmtUSD } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 const WINDOWS = [
   { value: 7, label: "7d" },
@@ -91,16 +92,19 @@ function StatTile({
 export function OverviewPage() {
   const [days, setDays] = React.useState(30);
 
+  const { account } = useWorkspace();
   const { data, isLoading, error } = useQuery<OverviewData>({
-    queryKey: ["overview", days],
-    queryFn: () => api.overview(days),
+    queryKey: ["overview", account, days],
+    queryFn: () => api.overview(days, account),
+    enabled: Boolean(account),
     refetchInterval: 30_000,
   });
 
   // Active runs poll faster - this is the "is it working right now" signal.
   const { data: active } = useQuery<Run[]>({
-    queryKey: ["active"],
-    queryFn: api.activeRuns,
+    queryKey: ["active", account],
+    queryFn: () => api.activeRuns(account),
+    enabled: Boolean(account),
     refetchInterval: 5_000,
   });
 
@@ -176,7 +180,11 @@ export function OverviewPage() {
             <StatTile
               label="Spend"
               value={fmtUSD(data.cost)}
-              hint={`${fmtUSD(data.cost_per_review)} per review`}
+              hint={
+                data.byok?.cost
+                  ? `${fmtUSD(data.cost_per_review)} per review · ${fmtUSD(data.byok.cost)} on your API keys`
+                  : `${fmtUSD(data.cost_per_review)} per review`
+              }
               icon={CircleDollarSign}
               spark={spark("cost")}
             />
@@ -219,7 +227,11 @@ export function OverviewPage() {
           <CardHeader>
             <div>
               <CardTitle>Spend per day</CardTitle>
-              <CardDescription>Model cost, excluding cached replays.</CardDescription>
+              <CardDescription>
+                {data?.byok?.cost
+                  ? "PullAgent credits and your own API keys, excluding cached replays."
+                  : "Model cost, excluding cached replays."}
+              </CardDescription>
             </div>
             {data && (
               <Badge tone="brand" className="tabular">
@@ -300,6 +312,47 @@ export function OverviewPage() {
           </CardBody>
         </Card>
       </div>
+
+      {data && data.byok?.runs > 0 && (
+        <Card className="animate-fade-up mt-3">
+          <CardHeader>
+            <div>
+              <CardTitle>Spend on your API keys</CardTitle>
+              <CardDescription>
+                {fmtInt(data.byok.runs)} review{data.byok.runs === 1 ? "" : "s"} ran on your own
+                connections, billed by your providers. Prices come from what you set on each model.
+              </CardDescription>
+            </div>
+            <Badge tone="brand" className="tabular">
+              {fmtUSD(data.byok.cost)} total
+            </Badge>
+          </CardHeader>
+          <CardBody className="space-y-3 pt-3">
+            <SpendBars
+              data={Object.fromEntries(data.byok.by_model.map((m) => [m.label, m.cost]))}
+              color="var(--series-2)"
+              labelWidth="w-60"
+            />
+            {data.byok.by_model.some((m) => !m.priced) && (
+              <p className="flex items-start gap-1.5 text-[12px] text-fg-muted">
+                <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-warning" />
+                <span>
+                  Some models have no price, so their spend shows as less than it is:{" "}
+                  {data.byok.by_model
+                    .filter((m) => !m.priced)
+                    .map((m) => `${m.label} (${fmtInt(m.input_tokens + m.output_tokens)} tokens)`)
+                    .join(", ")}
+                  . Set prices under{" "}
+                  <Link to="/models" className="font-medium text-brand-600 hover:underline dark:text-brand-300">
+                    Models
+                  </Link>
+                  .
+                </span>
+              </p>
+            )}
+          </CardBody>
+        </Card>
+      )}
 
       {data && !data.kill_rate_reliable && data.kill_rate_sample > 0 && (
         <p className="mt-4 flex items-start gap-1.5 text-[12px] text-fg-muted">

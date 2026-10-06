@@ -10,11 +10,12 @@
  * classes. One class per surface means a theme change is a token change, not a
  * sweep through every component.
  */
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cva, type VariantProps } from "class-variance-authority";
-import { Check, ChevronDown, Loader2 } from "lucide-react";
+import { Check, ChevronDown, Loader2, X } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "../../lib/utils";
@@ -233,30 +234,56 @@ export function Select({
   options,
   placeholder = "All",
   className,
+  ariaLabel,
+  variant = "filter",
+  disabled,
+  id,
+  capitalize = true,
+  allowEmpty = true,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: SelectOption[];
   placeholder?: string;
   className?: string;
+  ariaLabel?: string;
+  /** "filter" tints itself while set; "field" is a plain form control. */
+  variant?: "filter" | "field";
+  disabled?: boolean;
+  id?: string;
+  /** Title-case option labels. Off for names people typed, like tier names. */
+  capitalize?: boolean;
+  /** Offer the placeholder as a choice ("All", "Default"). Off for required fields. */
+  allowEmpty?: boolean;
 }) {
   const ALL = "__all__";
-  const active = Boolean(value);
+  const active = Boolean(value) && variant === "filter";
   return (
-    <SelectPrimitive.Root value={value || ALL} onValueChange={(v) => onChange(v === ALL ? "" : v)}>
+    <SelectPrimitive.Root
+      // Radix shows the placeholder for "", so a required field can start empty.
+      value={value || (allowEmpty ? ALL : "")}
+      onValueChange={(v) => onChange(v === ALL ? "" : v)}
+      disabled={disabled}
+    >
       <SelectPrimitive.Trigger
+        id={id}
+        aria-label={ariaLabel}
         className={cn(
           "inline-flex h-9 items-center justify-between gap-2 rounded-lg border px-3 text-[13px] shadow-xs",
-          "transition-colors data-[state=open]:border-brand-500",
+          "transition-colors data-[state=open]:border-brand-500 disabled:cursor-not-allowed disabled:opacity-50",
           // A filter that is doing something looks different from one that is
           // not - otherwise a stale filter silently hides half the table.
           active
             ? "border-brand-500/40 bg-brand-500/8 text-brand-700 dark:text-brand-200"
-            : "border-line bg-surface text-fg-muted hover:border-line-strong hover:bg-surface-2",
+            : variant === "field"
+              ? "border-line bg-surface text-fg hover:border-line-strong"
+              : "border-line bg-surface text-fg-muted hover:border-line-strong hover:bg-surface-2",
           className,
         )}
       >
-        <SelectPrimitive.Value placeholder={placeholder} />
+        <span className="min-w-0 truncate">
+          <SelectPrimitive.Value placeholder={placeholder} />
+        </span>
         <ChevronDown className="h-3.5 w-3.5 opacity-60" />
       </SelectPrimitive.Trigger>
       <SelectPrimitive.Portal>
@@ -266,9 +293,13 @@ export function Select({
           className="animate-pop-in z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-auto rounded-xl border border-line bg-surface p-1 shadow-lg"
         >
           <SelectPrimitive.Viewport>
-            <Item value={ALL}>{placeholder}</Item>
+            {allowEmpty && (
+              <Item value={ALL} capitalize={capitalize}>
+                {placeholder}
+              </Item>
+            )}
             {options.map((o) => (
-              <Item key={o.value} value={o.value}>
+              <Item key={o.value} value={o.value} capitalize={capitalize}>
                 {o.label}
               </Item>
             ))}
@@ -279,11 +310,23 @@ export function Select({
   );
 }
 
-function Item({ value, children }: { value: string; children: React.ReactNode }) {
+function Item({
+  value,
+  children,
+  capitalize,
+}: {
+  value: string;
+  children: React.ReactNode;
+  capitalize?: boolean;
+}) {
   return (
     <SelectPrimitive.Item
       value={value}
-      className="relative flex cursor-pointer items-center rounded-lg py-1.5 pr-3 pl-7 text-[13px] text-fg-muted capitalize outline-none select-none data-[highlighted]:bg-surface-2 data-[highlighted]:text-fg data-[state=checked]:text-fg"
+      className={cn(
+        "relative flex cursor-pointer items-center rounded-lg py-1.5 pr-3 pl-7 text-[13px] text-fg-muted outline-none",
+        capitalize && "capitalize",
+        "select-none data-[highlighted]:bg-surface-2 data-[highlighted]:text-fg data-[state=checked]:text-fg",
+      )}
     >
       <SelectPrimitive.ItemIndicator className="absolute left-2 text-brand-600 dark:text-brand-300">
         <Check className="h-3.5 w-3.5" />
@@ -406,6 +449,107 @@ export function Tooltip({ label, children }: { label: React.ReactNode; children:
         </TooltipPrimitive.Content>
       </TooltipPrimitive.Portal>
     </TooltipPrimitive.Root>
+  );
+}
+
+/* --- dialog -------------------------------------------------------------- */
+
+/**
+ * A modal on Radix Dialog: focus is trapped, Escape and the overlay close it,
+ * and focus returns to whatever opened it. The body scrolls inside the panel
+ * so a long form never pushes its own buttons off screen.
+ */
+export function Dialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  children,
+  footer,
+  size = "md",
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description?: React.ReactNode;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  size?: "md" | "lg";
+}) {
+  return (
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 animate-fade-in bg-black/40 backdrop-blur-[2px]" />
+        <DialogPrimitive.Content
+          className={cn(
+            "animate-pop-in fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col",
+            "rounded-2xl border border-line bg-surface shadow-lg focus:outline-none",
+            size === "lg" ? "max-w-3xl" : "max-w-md",
+          )}
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
+            <div className="min-w-0">
+              <DialogPrimitive.Title className="font-display text-[15.5px] font-semibold text-fg">
+                {title}
+              </DialogPrimitive.Title>
+              {description ? (
+                <DialogPrimitive.Description className="mt-1 text-[12.5px] leading-snug text-fg-muted">
+                  {description}
+                </DialogPrimitive.Description>
+              ) : (
+                <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>
+              )}
+            </div>
+            <DialogPrimitive.Close
+              className="-mr-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-fg-muted hover:bg-surface-2 hover:text-fg"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </DialogPrimitive.Close>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          {footer && (
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-5 py-3">
+              {footer}
+            </div>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
+}
+
+/** A label, the control, and an optional hint or error, wired for screen readers. */
+export function Field({
+  label,
+  hint,
+  error,
+  htmlFor,
+  children,
+  className,
+}: {
+  label: string;
+  hint?: React.ReactNode;
+  error?: string | null;
+  htmlFor?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    // content-start: beside a taller field in the same row, rows must not stretch.
+    <div className={cn("grid content-start gap-1.5", className)}>
+      <label htmlFor={htmlFor} className="text-[12.5px] font-medium text-fg">
+        {label}
+      </label>
+      {children}
+      {error ? (
+        <p role="alert" className="text-[12px] text-critical">
+          {error}
+        </p>
+      ) : hint ? (
+        <p className="text-[12px] leading-snug text-fg-muted">{hint}</p>
+      ) : null}
+    </div>
   );
 }
 

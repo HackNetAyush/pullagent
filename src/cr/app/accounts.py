@@ -149,26 +149,53 @@ async def memberships(token: str, login: str) -> list[dict[str, Any]]:
     with. It is not a security boundary — an admin still approves every request
     by hand — it just keeps the queue honest.
     """
-    out: list[dict[str, Any]] = [{"login": login, "type": "User"}]
+    out: list[dict[str, Any]] = [{"login": login, "type": "User", "role": "admin"}]
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     try:
         async with httpx.AsyncClient(base_url=GITHUB_API, timeout=20.0) as c:
+            # Memberships carry the role, which decides who may change an
+            # org's keys and routing. It needs the App's "Members: read"
+            # permission; without it, fall back to plain membership, where
+            # everyone is a member - able to view, never to manage.
             r = await c.get(
-                "/user/orgs",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                },
-                params={"per_page": 100},
+                "/user/memberships/orgs",
+                headers=headers,
+                params={"state": "active", "per_page": 100},
             )
             if r.status_code == 200:
-                out += [{"login": o["login"], "type": "Organization"} for o in r.json()]
+                out += [
+                    {
+                        "login": m["organization"]["login"],
+                        "type": "Organization",
+                        "role": "admin" if m.get("role") == "admin" else "member",
+                    }
+                    for m in r.json()
+                    if m.get("organization", {}).get("login")
+                ]
+                return out
+            log.info("org roles unavailable for %s (HTTP %s)", login, r.status_code)
+            r = await c.get("/user/orgs", headers=headers, params={"per_page": 100})
+            if r.status_code == 200:
+                out += [
+                    {"login": o["login"], "type": "Organization", "role": "member"}
+                    for o in r.json()
+                ]
     except Exception as e:  # noqa: BLE001 - a missing org list must not block sign-in
         log.warning("could not read orgs for %s: %s", login, e)
     return out
 
 
-def sign_in(identity: Identity, s: Settings) -> str:
-    """Record the user and open a session. Returns the session token."""
+def sign_in(
+    identity: Identity,
+    s: Settings,
+    orgs: list[str] | None = None,
+    admin_orgs: list[str] | None = None,
+) -> str:
+    """Record the user and open a session. Returns the session token.
+
+    `orgs` replaces the stored membership list when given; it is what decides
+    which organisations' API keys and tiers this user may manage.
+    """
     seeded = identity.login.lower() in admin_logins(s)
     # Never demote: an admin promoted through the UI must not be reset by a
     # deployment whose CR_ADMIN_LOGINS no longer lists them.
@@ -179,6 +206,8 @@ def sign_in(identity: Identity, s: Settings) -> str:
         avatar_url=identity.avatar_url,
         email=identity.email,
         is_admin=True if seeded else None,
+        orgs=orgs,
+        admin_orgs=admin_orgs,
     )
     token = secrets.token_urlsafe(32)
     store.create_session(token, identity.id, s.session_ttl_s)

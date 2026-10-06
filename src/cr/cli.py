@@ -27,7 +27,6 @@ from cr.diff import DiffSet, collect, parse
 from cr.doctor import run as doctor_run
 from cr.github import MARKER, GitHubPR, PRRef, build_review, pr_from_env
 from cr.lint import analyse
-from cr.llm.openai_responses import RESPONSES_API_MODELS
 from cr.llm.prefix import PRContext, RepoContext
 from cr.models import ReviewResult, Severity
 from cr.repo import RepoCache, default_cache_dir
@@ -358,29 +357,43 @@ def review_pr(
 
 @app.command()
 def doctor(
-    model: Annotated[str | None, typer.Option("--model", "-m")] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model", "-m", help="Registry name, e.g. claude-sonnet-5 or groq:openai/gpt-oss-120b"
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Probe the provider: reachability, structured outputs, and prompt caching.
+    """Probe a model: reachability, structured outputs, effort, and prompt caching.
 
-    Costs a fraction of a cent. Run this before your first review — on Foundry,
-    caching is a beta capability, so whether it actually works is a real question
-    and every cost estimate depends on the answer.
+    Costs a fraction of a cent. Run this before your first review, and before
+    routing a tier to a model you have not used yet — on Foundry, caching is a
+    beta capability, so whether it actually works is a real question and every
+    cost estimate depends on the answer.
     """
     _setup_logging(verbose)
     target = model or TIERS["T2"].model
-    console.print(f"[dim]provider={settings.provider} model={target}[/dim]\n")
 
     report = doctor_run(settings, target)
+    console.print(f"[dim]provider={report.provider or '?'} model={target}[/dim]\n")
 
     def mark(ok: bool) -> str:
         return "[green]yes[/green]" if ok else "[red]no[/red]"
 
     t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_row("protocol", report.wire or "-")
+    t.add_row("in registry", mark(report.known))
     t.add_row("reachable", mark(report.reachable))
     t.add_row("structured outputs", mark(report.structured_outputs))
-    t.add_row("effort accepted", mark(report.effort_accepted))
-    t.add_row("prompt caching", mark(report.caching_works))
+    t.add_row(
+        "effort",
+        mark(report.effort_accepted) if report.effort_supported else "[dim]not supported[/dim]",
+    )
+    t.add_row(
+        "prompt caching",
+        mark(report.caching_works) + f" [dim]({report.cache_mode or 'unknown'})[/dim]",
+    )
     t.add_row("cache write / read", f"{report.cache_write_tokens:,} / {report.cache_read_tokens:,}")
     t.add_row("probe cost", f"${report.cost_usd:.5f}")
     console.print(Panel(t, title="doctor", border_style="dim", title_align="left"))
@@ -388,22 +401,69 @@ def doctor(
     for err in report.errors:
         console.print(f"[red]error:[/red] {err}")
 
+    if not report.known:
+        console.print(
+            "\n[yellow]This model is not in the registry.[/yellow] It is priced at a "
+            "fallback rate; add it to cr/llm/registry.py so costs are real."
+        )
     if report.healthy and not report.caching_works:
-        if target in RESPONSES_API_MODELS:
-            console.print(
-                "\n[dim]No cache hit observed on the second call. Expected for now — "
-                "this deployment's cache behavior (if any) is unconfirmed, so cost is "
-                "computed with no cache discount either way.[/dim]"
-            )
-        else:
+        if report.caching_expected:
             console.print(
                 "\n[yellow]Caching is not taking effect.[/yellow] It still works, but input "
                 "costs will be roughly 5x the figures in the docs. Check that prompt caching "
                 "is enabled for this deployment."
             )
+        else:
+            console.print(
+                "\n[dim]No cache hit observed on the second call. This model has no explicit "
+                "cache, so that is expected; any automatic caching shows up in run costs.[/dim]"
+            )
     if not report.healthy:
         raise typer.Exit(1)
     console.print("\n[green]Ready.[/green]")
+
+
+@app.command()
+def models(
+    provider: Annotated[
+        str | None, typer.Option("--provider", "-p", help="Only this provider id")
+    ] = None,
+) -> None:
+    """List every provider and model CR knows, and which providers are configured."""
+    from cr.llm.client import provider_status
+    from cr.llm.registry import CATALOG, PROVIDERS
+
+    status = provider_status(settings)
+    pt = Table(title="Providers", title_justify="left", box=None, padding=(0, 2))
+    for col in ("id", "provider", "protocol", "status"):
+        pt.add_column(col)
+    for pid, p in PROVIDERS.items():
+        st = status[pid]
+        pt.add_row(
+            pid,
+            p.label,
+            p.wire.value,
+            "[green]configured[/green]"
+            if st["configured"]
+            else f"[dim]set {', '.join(st['missing'])}[/dim]",
+        )
+    console.print(pt)
+
+    mt = Table(title="\nModels", title_justify="left", box=None, padding=(0, 2))
+    mt.add_column("ref", no_wrap=True)
+    for col in ("model", "$ in / out per 1M", "cache", "effort"):
+        mt.add_column(col)
+    for m in CATALOG:
+        if provider and m.provider != provider:
+            continue
+        price = (
+            f"{m.pricing.input:g} / {m.pricing.output:g}" if m.pricing else "[dim]unpriced[/dim]"
+        )
+        levels = m.effort_levels
+        effort = f"{levels[0]}–{levels[-1]}" if m.supports_effort else "-"
+        label = m.label if m.verified else f"{m.label} [yellow](unverified)[/yellow]"
+        mt.add_row(m.ref, label, price, m.cache.value, effort)
+    console.print(mt)
 
 
 @app.command()
@@ -829,6 +889,48 @@ def app_status() -> None:
             status = f"[{colour}]{j.status}[/{colour}]" if colour else j.status
             jt.add_row(str(j.id), j.kind, j.key, status)
         console.print(jt)
+
+
+@app_cli.command("doctor")
+def app_doctor() -> None:
+    """Check the App's setup on GitHub and whether its webhooks get through."""
+    from cr.app.auth import AppAuth, AuthError
+    from cr.app.diagnose import diagnose
+    from cr.app.manifest import apply_credentials, load_credentials
+
+    if not settings.app_configured():
+        apply_credentials(load_credentials(settings.credentials_path()) or {}, settings)
+
+    async def go():
+        auth = AppAuth.from_settings(settings)
+        try:
+            return await diagnose(auth, recorded_installations=len(store.installations()))
+        finally:
+            await auth.aclose()
+
+    try:
+        report = asyncio.run(go())
+    except (AuthError, OSError) as e:
+        console.print(f"[red]x[/red] could not reach GitHub as the App: {e}")
+        raise typer.Exit(1) from e
+
+    console.print(f"[bold]{report.app}[/bold]  webhooks -> {report.hook_url or '-'}")
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    for c in report.checks:
+        t.add_row("[green]ok[/green]" if c.ok else "[red]!![/red]", c.title, c.detail)
+    console.print(t)
+    for f in report.failures[:10]:
+        console.print(
+            f"  [dim]{f.get('delivered_at')}[/dim]  {f.get('event')} {f.get('action') or ''}"
+            f"  -> {f.get('status_code') or 'no response'}"
+        )
+    if report.failures:
+        console.print(
+            "[dim]Fix what the failures point at, then redeliver them from the App's "
+            "settings (Advanced > Recent Deliveries).[/dim]"
+        )
+    if not report.healthy:
+        raise typer.Exit(1)
 
 
 @app_cli.command("worker")

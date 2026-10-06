@@ -4,11 +4,13 @@ import { createRoot } from "react-dom/client";
 import { Navigate, RouterProvider, createBrowserRouter } from "react-router-dom";
 
 import { AuthGate, RequireAdmin } from "./auth";
+import { WorkspaceProvider } from "./workspace";
 import { Layout } from "./components/Layout";
 import { TooltipProvider } from "./components/ui";
 import { ApiError } from "./lib/api";
 import { AccountsPage } from "./pages/Accounts";
 import { FindingsPage } from "./pages/Findings";
+import { ModelsPage } from "./pages/Models";
 import { OverviewPage } from "./pages/Overview";
 import { QueuePage } from "./pages/Queue";
 import { ReposPage } from "./pages/Repos";
@@ -42,6 +44,7 @@ const router = createBrowserRouter([
       { path: "repos", element: <ReposPage /> },
       { path: "suppressions", element: <SuppressionsPage /> },
       { path: "queue", element: <QueuePage /> },
+      { path: "models", element: <ModelsPage /> },
       {
         path: "accounts",
         element: (
@@ -62,7 +65,9 @@ createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
         <AuthGate>
-          <RouterProvider router={router} />
+          <WorkspaceProvider>
+            <RouterProvider router={router} />
+          </WorkspaceProvider>
         </AuthGate>
       </TooltipProvider>
     </QueryClientProvider>

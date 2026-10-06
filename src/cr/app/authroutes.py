@@ -111,7 +111,16 @@ def build_auth_router(get_settings, get_public_url) -> APIRouter:
             log.warning("sign-in failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=400)
 
-        session_token = accounts.sign_in(identity, s)
+        # Read on every sign-in, so leaving an org revokes access to its keys
+        # and tiers by the next session. `memberships` never raises.
+        member_of = await accounts.memberships(token, identity.login)
+        orgs = [m["login"] for m in member_of if m.get("type") == "Organization"]
+        admin_orgs = [
+            m["login"]
+            for m in member_of
+            if m.get("type") == "Organization" and m.get("role") == "admin"
+        ]
+        session_token = accounts.sign_in(identity, s, orgs=orgs, admin_orgs=admin_orgs)
         resp = RedirectResponse("/", status_code=302)
         resp.set_cookie(
             accounts.SESSION_COOKIE,

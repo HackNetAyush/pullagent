@@ -14,11 +14,12 @@
  * document flow at `lg:static`, which meant a long table scrolled the
  * navigation off the top of the screen with it.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   BadgeCheck,
   BookOpen,
+  Boxes,
   ChevronDown,
   FolderGit2,
   Gauge,
@@ -35,6 +36,7 @@ import * as React from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { useMe } from "../auth";
+import { ALL, useWorkspace } from "../workspace";
 import { api, type Run } from "../lib/api";
 import { cn } from "../lib/utils";
 import {
@@ -45,6 +47,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  Select,
   Tooltip,
 } from "./ui";
 
@@ -56,9 +59,9 @@ interface NavItem {
 }
 
 /**
- * Grouped, because seven flat links is a list to read rather than a structure
- * to navigate. The split is by question: what happened, and what is the
- * machine doing about it.
+ * Grouped, because eight flat links is a list to read rather than a structure
+ * to navigate. The split is by question: what happened, what is the machine
+ * doing about it, and how is it set up.
  */
 const NAV: { section: string | null; items: NavItem[] }[] = [
   {
@@ -81,6 +84,10 @@ const NAV: { section: string | null; items: NavItem[] }[] = [
       { to: "/accounts", label: "Access", icon: ShieldCheck, adminOnly: true },
     ],
   },
+  {
+    section: "Configuration",
+    items: [{ to: "/models", label: "Models", icon: Boxes }],
+  },
 ];
 
 /** Route -> title, so the top bar can name the page without each page telling it. */
@@ -92,6 +99,7 @@ const TITLES: Record<string, string> = {
   "/suppressions": "Suppressions",
   "/queue": "Queue",
   "/accounts": "Access",
+  "/models": "Models",
 };
 
 function useTheme() {
@@ -119,7 +127,7 @@ function Logomark({ className }: { className?: string }) {
         className,
       )}
     >
-      CR
+      PA
     </div>
   );
 }
@@ -178,9 +186,11 @@ export function Layout() {
 
   // Same query key the Overview uses, so this shares one poll rather than
   // opening a second one for the same endpoint.
+  const { account, setAccount, current, list } = useWorkspace();
   const { data: active } = useQuery<Run[]>({
-    queryKey: ["active"],
-    queryFn: api.activeRuns,
+    queryKey: ["active", account],
+    queryFn: () => api.activeRuns(account),
+    enabled: Boolean(account),
     refetchInterval: 5_000,
     retry: false,
   });
@@ -217,9 +227,9 @@ export function Layout() {
         <div className="flex h-15 shrink-0 items-center gap-2.5 px-4">
           <Logomark className="h-8 w-8 text-[12px] font-bold" />
           <div className="min-w-0">
-            <p className="font-display text-[14px] leading-tight font-bold text-fg">Code Review</p>
+            <p className="font-display text-[14px] leading-tight font-bold text-fg">PullAgent</p>
             <p className="truncate text-[11px] leading-tight text-fg-faint">
-              {me?.login ? `@${me.login}` : "Automated PR review"}
+              {me?.login ? `@${me.login}` : "AI code review"}
             </p>
           </div>
           <Button
@@ -253,7 +263,7 @@ export function Layout() {
 
         <div className="shrink-0 border-t border-line p-3">
           <a
-            href="https://github.com/apps"
+            href={list?.install_url || "https://github.com/apps/pullagent"}
             target="_blank"
             rel="noreferrer"
             className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[12.5px] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
@@ -294,6 +304,25 @@ export function Layout() {
           )}
 
           <div className="ml-auto flex items-center gap-1.5">
+            {list && list.workspaces.length + (list.is_admin ? 1 : 0) > 1 && (
+              <Select
+                value={account}
+                onChange={(v) => v && setAccount(v)}
+                options={[
+                  ...(list.is_admin ? [{ value: ALL, label: "All workspaces" }] : []),
+                  ...list.workspaces.map((w) => ({
+                    value: w.login,
+                    label: w.kind === "personal" ? `${w.login} (you)` : w.login,
+                  })),
+                ]}
+                placeholder="Workspace"
+                ariaLabel="Workspace"
+                variant="field"
+                capitalize={false}
+                allowEmpty={false}
+                className="h-8 max-w-[14rem] min-w-36"
+              />
+            )}
             <Tooltip label={theme === "dark" ? "Switch to light" : "Switch to dark"}>
               <Button size="icon" variant="ghost" onClick={toggle} aria-label="Toggle theme">
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
@@ -356,10 +385,86 @@ export function Layout() {
         {/* The one scrolling region in the app. `key` restarts the entrance
             animation on navigation so a route change reads as a change. */}
         <main className="min-h-0 flex-1 overflow-y-auto">
+          {/* Outside the per-route container, so moving between pages does not
+              remount the banner and ask GitHub again. */}
+          {list && current && !current.installed && (
+            <div className="mx-auto max-w-[1500px] px-4 pt-6 sm:px-6">
+              <InstallBanner key={current.login} account={current.login} url={list.install_url} />
+            </div>
+          )}
           <div key={location.pathname} className="animate-fade-up mx-auto max-w-[1500px] px-4 py-6 sm:px-6">
             <Outlet />
           </div>
         </main>
+      </div>
+    </div>
+  );
+}
+
+/** Shown on a workspace where the App is not installed: nothing there is
+ *  reviewed, so the empty pages need a reason and a next step.
+ *
+ *  Installing happens on GitHub, in another tab, and its webhook can land
+ *  after the person comes back (or never, on a laptop). So while this banner
+ *  is up, and only then, it asks GitHub about this one account: when it
+ *  appears, when the tab comes back into view, and on "Check again". */
+function InstallBanner({ account, url }: { account: string; url: string }) {
+  const qc = useQueryClient();
+  const [checked, setChecked] = React.useState(false);
+  const check = useMutation({
+    mutationFn: () => api.checkInstallation(account),
+    onSettled: async () => {
+      await qc.invalidateQueries({ queryKey: ["workspaces"] });
+      setChecked(true);
+    },
+  });
+  const { mutate, isPending } = check;
+  // Coming back to a tab fires both "focus" and "visibilitychange"; one ask
+  // is enough, and one in flight is enough.
+  const pending = React.useRef(false);
+  pending.current = isPending;
+  const lastAsked = React.useRef(0);
+
+  React.useEffect(() => {
+    const ask = () => {
+      if (document.visibilityState !== "visible" || pending.current) return;
+      if (Date.now() - lastAsked.current < 2_000) return;
+      lastAsked.current = Date.now();
+      mutate();
+    };
+    ask();
+    window.addEventListener("focus", ask);
+    document.addEventListener("visibilitychange", ask);
+    return () => {
+      window.removeEventListener("focus", ask);
+      document.removeEventListener("visibilitychange", ask);
+    };
+  }, [account, mutate]);
+
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center gap-3 rounded-xl border border-brand-500/25 bg-brand-500/6 px-4 py-3"
+    >
+      <p className="min-w-0 flex-1 text-[13px] text-fg">
+        <span className="font-semibold">PullAgent is not installed on {account}.</span>{" "}
+        <span className="text-fg-muted">
+          {checked
+            ? `Already installed? Make sure ${account} was the account you picked on GitHub.`
+            : `Install it to have ${account}'s pull requests reviewed. Nothing appears here until then.`}
+        </span>
+      </p>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button variant="ghost" size="sm" loading={isPending} onClick={() => mutate()}>
+          Check again
+        </Button>
+        {url && (
+          <a href={url} target="_blank" rel="noreferrer">
+            <Button variant="primary" size="sm">
+              Install on GitHub
+            </Button>
+          </a>
+        )}
       </div>
     </div>
   );

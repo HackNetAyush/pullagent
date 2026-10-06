@@ -35,7 +35,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="grid h-full place-items-center bg-plane">
         <div className="flex flex-col items-center gap-3">
           <div className="animate-pulse-ring grid h-11 w-11 place-items-center rounded-xl bg-linear-to-br from-brand-400 to-brand-700 font-display text-[15px] font-bold text-white">
-            CR
+            PA
           </div>
           <div className="skeleton h-2 w-24 rounded-full" />
         </div>
@@ -57,7 +57,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (me && me.sign_in_configured && !me.signed_in) {
     return (
       <SignInScreen
-        title="Sign in to CR"
+        title="Sign in to PullAgent"
         hint="This dashboard is restricted to signed-in members of this installation."
         showButton
       />
@@ -90,7 +90,7 @@ function SignInScreen({
       <Card className="animate-fade-up relative w-full max-w-sm shadow-lg">
         <CardBody className="flex flex-col items-center gap-3 px-8 py-10 text-center">
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-linear-to-br from-brand-400 to-brand-700 font-display text-[16px] font-bold text-white shadow-md inset-shadow-[0_1px_0_rgba(255,255,255,.25)]">
-            CR
+            PA
           </div>
           <div>
             <h1 className="font-display text-[19px] font-bold tracking-[-0.01em] text-fg">{title}</h1>

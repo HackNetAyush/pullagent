@@ -9,6 +9,7 @@ import { FilterBar, PageHeader } from "../components/Layout";
 import { Badge, Card, CardBody, SearchInput, Select, Tooltip } from "../components/ui";
 import { api, type Page, type Suppression } from "../lib/api";
 import { fmtInt } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 /** Where each suppression came from — the audit trail for "why did CR stop
  *  telling me about this". */
@@ -33,7 +34,9 @@ export function SuppressionsPage() {
     return () => clearTimeout(id);
   }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const { account } = useWorkspace();
   const params = {
+    account,
     limit: t.limit,
     offset: t.offset,
     reason: t.get("reason"),
@@ -44,12 +47,14 @@ export function SuppressionsPage() {
   const { data, isFetching, error, refetch } = useQuery<Page<Suppression>>({
     queryKey: ["suppressions", params],
     queryFn: () => api.suppressions(params),
+    enabled: Boolean(account),
     placeholderData: keepPreviousData,
   });
 
   const { data: facets } = useQuery({
-    queryKey: ["run-facets"],
-    queryFn: api.runFacets,
+    queryKey: ["run-facets", account],
+    queryFn: () => api.runFacets(account),
+    enabled: Boolean(account),
     staleTime: 300_000,
   });
 
@@ -119,13 +124,13 @@ export function SuppressionsPage() {
     <>
       <PageHeader
         title="Suppressions"
-        description="Findings a human rejected. CR will not raise any of these on that repository again."
+        description="Findings a human rejected. PullAgent will not raise any of these on that repository again."
       />
 
       <Card className="mb-3">
         <CardBody className="text-[13px] text-fg-muted">
           Resolve a review thread, react 👎, reply <code className="rounded bg-surface-2 px-1">@pullagent ignore</code>,
-          or argue CR out of a finding — all four write a row here.{" "}
+          or argue PullAgent out of a finding — all four write a row here.{" "}
           <span className="text-fg-muted">
             {fmtInt(data?.total || 0)} stored, {fmtInt(fired)} fired on this page.
           </span>
@@ -167,7 +172,7 @@ export function SuppressionsPage() {
           onRetry={refetch}
           rowId={(s) => s.id}
           emptyTitle="Nothing suppressed yet"
-          emptyHint="CR learns from dismissals — resolve a thread or react 👎 on a comment it got wrong."
+          emptyHint="PullAgent learns from dismissals — resolve a thread or react 👎 on a comment it got wrong."
         />
       </Card>
     </>

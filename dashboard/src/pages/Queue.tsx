@@ -20,6 +20,7 @@ import {
 } from "../components/ui";
 import { api, type AppStatus, type Job, type Page } from "../lib/api";
 import { STATUS_VAR, relTime } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 const KINDS = ["review", "reply", "command", "index"];
 const STATUSES = ["queued", "running", "done", "failed", "superseded", "skipped"];
@@ -33,7 +34,9 @@ export function QueuePage() {
   const [search, setSearch] = useSearchParams();
   const t = useTableParams(search, setSearch);
 
+  const { account } = useWorkspace();
   const params = {
+    account,
     limit: t.limit,
     offset: t.offset,
     kind: t.get("kind"),
@@ -43,6 +46,7 @@ export function QueuePage() {
   const { data, isFetching, error, refetch } = useQuery<Page<Job>>({
     queryKey: ["jobs", params],
     queryFn: () => api.jobs(params),
+    enabled: Boolean(account),
     placeholderData: keepPreviousData,
     refetchInterval: 10_000,
   });
@@ -52,8 +56,9 @@ export function QueuePage() {
     isLoading: statusLoading,
     error: statusError,
   } = useQuery<AppStatus>({
-    queryKey: ["app-status"],
-    queryFn: api.appStatus,
+    queryKey: ["app-status", account],
+    queryFn: () => api.appStatus(account),
+    enabled: Boolean(account),
     refetchInterval: 10_000,
     retry: false,
   });

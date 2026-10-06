@@ -10,6 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PLACEHOLDER = "<<< FILL ME >>>"
 
 
+class LensRoute(BaseModel):
+    """One agent's own model and effort, overriding its tier's defaults."""
+
+    model: str
+    effort: str
+
+
 class TierConfig(BaseModel):
     name: str
     model: str
@@ -26,6 +33,39 @@ class TierConfig(BaseModel):
     # A 16k cap exhausted all three live T2 finder calls before JSON was emitted.
     finder_max_tokens: int = Field(default=32000, ge=1024)
     verifier_max_tokens: int = Field(default=12000, ge=1024)
+    # Per-agent overrides, keyed by lens. A lens listed here runs on its own
+    # model and effort instead of the tier's. Custom tiers use these; the
+    # managed presets never do. Merge and adjudication always use the tier's
+    # verifier defaults — they judge across lenses, so no one lens owns them.
+    finder_routes: dict[str, LensRoute] = Field(default_factory=dict)
+    verifier_routes: dict[str, LensRoute] = Field(default_factory=dict)
+    # Owner-written lenses: lens id -> full instruction. A lens listed in
+    # `finders` / `verifier_lenses` with an entry here uses it instead of a
+    # built-in prompt. Custom tiers only.
+    finder_prompts: dict[str, str] = Field(default_factory=dict)
+    verifier_prompts: dict[str, str] = Field(default_factory=dict)
+    # A customer-built tier, running on the customer's own keys, and its name.
+    custom: bool = False
+    label: str = ""
+
+    def finder_route(self, lens: str) -> tuple[str, str]:
+        r = self.finder_routes.get(lens)
+        return (r.model, r.effort) if r else (self.model, self.effort)
+
+    def checker(self) -> tuple[str, str]:
+        """The verifier defaults: merge, adjudication, and any lens without its own route."""
+        return self.verifier_model or self.model, self.verifier_effort
+
+    def verifier_route(self, lens: str) -> tuple[str, str]:
+        r = self.verifier_routes.get(lens)
+        return (r.model, r.effort) if r else self.checker()
+
+    def models(self) -> set[str]:
+        """Every model name this tier can call."""
+        out = {self.model, self.checker()[0]}
+        out |= {r.model for r in self.finder_routes.values()}
+        out |= {r.model for r in self.verifier_routes.values()}
+        return out
 
 
 class Settings(BaseSettings):
@@ -119,20 +159,51 @@ class Settings(BaseSettings):
     verifier_base_url: str | None = None
     verifier_api_key: str | None = None
 
-    # Foundry deployment names. Must be Settings fields, not os.environ lookups:
+    # Models per tier slot. Must be Settings fields, not os.environ lookups:
     # pydantic-settings loads .env into this object, not the process env.
+    #
+    # A bare name (`claude-sonnet-5`) resolves through the model registry —
+    # Claude names to the CR_PROVIDER endpoint, where on Foundry they are the
+    # deployment names. `provider:model` picks a provider explicitly, e.g.
+    # `groq:openai/gpt-oss-120b` or `openrouter:google/gemini-3.8-flash`. The
+    # catalog of known models is `cr.llm.registry.CATALOG`.
     model_small: str = "claude-sonnet-5"
     model_standard: str = "claude-sonnet-5"
     model_deep: str = "claude-sonnet-5"
     model_verifier: str = "claude-opus-5"
 
-    # T4 (experimental): finders on an OpenAI-Responses-API-shaped deployment,
-    # verification stays on Claude (model_standard). Not the same wire protocol
-    # as the Foundry Claude deployments above, so it gets its own credentials —
-    # defaulting to the Azure ones for convenience, but independently rotatable.
+    # T4 (experimental): finders on GPT-6 Luna via Azure OpenAI, verification on
+    # Claude (model_standard).
     model_t4: str = "gpt-6-luna"
+
+    # --- Provider credentials -------------------------------------------------
+    # Base URLs are fixed in the registry; only keys are configured here. A
+    # provider without a key is simply unavailable — nothing fails until a
+    # tier actually routes a model to it.
+    #
+    # Azure OpenAI defaults to the Foundry key and resource above. The base URL
+    # override is deployment configuration (CR_OPENAI_BASE_URL is its old name).
+    azure_openai_api_key: str | None = None
+    azure_openai_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CR_AZURE_OPENAI_BASE_URL", "CR_OPENAI_BASE_URL"),
+    )
+    # First-party OpenAI.
     openai_api_key: str | None = None
-    openai_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    groq_api_key: str | None = None
+    nvidia_api_key: str | None = None
+
+    # Encrypts the API keys customers add in the dashboard (bring-your-own-key).
+    # A Fernet key: `python -c "from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())"`. Comma-separate several to rotate:
+    # the first encrypts, all of them decrypt. Required whenever CR_DB_URL is
+    # set; a laptop install without one gets a key generated under the cache dir.
+    secrets_key: str | None = None
+    # "Test connection" runs per account per hour (each tests up to ten
+    # models). Every test spends a little of the customer's own credit, and an
+    # unlimited button is a free way to hammer a provider with their key.
+    key_test_limit_per_hour: int = Field(default=20, ge=1, le=100)
 
     # Hunks/files, not token counts: routing must not depend on a tokenizer.
     t1_max_hunks: int = 8
@@ -216,18 +287,6 @@ class Settings(BaseSettings):
         key = getattr(self, f"{role}_api_key", None) or self.azure_api_key
         return base, key
 
-    def openai_endpoint(self) -> tuple[str | None, str]:
-        """Return (base_url, api_key) for the Responses-API-shaped deployments
-        (T4). Falls back to the Azure Foundry credentials/resource for
-        convenience, but CR_OPENAI_API_KEY/CR_OPENAI_BASE_URL rotate independently."""
-        base = self.openai_base_url or (
-            f"https://{self.azure_resource}.services.ai.azure.com/openai/v1"
-            if self.azure_resource
-            else None
-        )
-        key = self.openai_api_key or self.azure_api_key or ""
-        return base, key
-
     def app_private_key(self) -> str | None:
         """The App's RSA private key as PEM text, from the env var or the file.
 
@@ -268,7 +327,17 @@ class Settings(BaseSettings):
         """Settings still holding the .env placeholder. A placeholder key looks
         like a broken endpoint, so report it by name."""
         out = []
-        for name in ("azure_api_key", "azure_resource", "azure_base_url", "anthropic_api_key"):
+        for name in (
+            "azure_api_key",
+            "azure_resource",
+            "azure_base_url",
+            "anthropic_api_key",
+            "azure_openai_api_key",
+            "openai_api_key",
+            "openrouter_api_key",
+            "groq_api_key",
+            "nvidia_api_key",
+        ):
             value = getattr(self, name, None)
             if value and PLACEHOLDER.strip("<> ") in str(value):
                 out.append(f"CR_{name.upper()}")
@@ -330,11 +399,10 @@ def build_tiers(s: Settings) -> dict[str, TierConfig]:
             finder_max_tokens=64000,
         ),
         # Experimental: finders on GPT-6 Luna (Azure Foundry, Responses API) at
-        # roughly 1/30th Sonnet 5's per-token price; verification stays on Claude
-        # Sonnet 5 as an independent adversarial check. No shared-prefix cache
-        # exists across this provider boundary, so unlike T1-T3 there is no
-        # discount to assume here — see PIPELINE.md §2.2 and client.py's
-        # `fanout()` docstring for why that trick is Anthropic-stream-specific.
+        # roughly 1/20th Sonnet 5's per-token price; verification stays on Claude
+        # Sonnet 5 as an independent adversarial check. GPT-6 Luna has no
+        # explicit cache to stagger for, so its finders fan out at once and pay
+        # full input price — see the model registry and `LLMClient.fanout`.
         # Opt-in only (`cr review --tier T4`) — triage never routes here.
         "T4": TierConfig(
             name="T4",

@@ -1,6 +1,9 @@
 """Connectivity probe: reachability, structured outputs, and whether prompt
-caching actually works. Caching is beta on Foundry — if it is off, every cost
-figure in the docs is wrong by ~5x."""
+caching actually works — for any model in the registry, on any provider.
+
+Caching is the number to watch. On explicit-cache providers (Claude) every
+cost figure in the docs assumes it; if it is off, they are wrong by ~5x.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +13,9 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel
 
 from cr.config import Settings
-from cr.llm.client import CACHE_MULTIPLIERS, RATES, LLMClient, build_pool
-from cr.llm.openai_responses import RESPONSES_API_MODELS, build_adapter, to_responses_input
+from cr.llm.client import LLMClient, build_pool
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
-from cr.models import Usage
+from cr.llm.registry import PROVIDERS, CacheMode
 
 # The cacheable prefix minimum is 1024 tokens on Sonnet 5, so a probe has to be
 # genuinely large or it silently will not cache and the result is meaningless.
@@ -22,6 +24,9 @@ _FILLER = (
     "controllers, prefers composition over inheritance, and requires a regression "
     "test for every bug fix. Error handling happens at system boundaries only. "
 )
+
+# Room for a reasoning model to think briefly before a two-field answer.
+_PROBE_MAX_TOKENS = 2048
 
 
 class Probe(BaseModel):
@@ -33,8 +38,12 @@ class Probe(BaseModel):
 class DoctorReport:
     provider: str = ""
     model: str = ""
+    wire: str = ""
+    cache_mode: str = ""
+    known: bool = True
     reachable: bool = False
     structured_outputs: bool = False
+    effort_supported: bool = False
     effort_accepted: bool = False
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
@@ -44,6 +53,10 @@ class DoctorReport:
     @property
     def caching_works(self) -> bool:
         return self.cache_read_tokens > 0
+
+    @property
+    def caching_expected(self) -> bool:
+        return self.cache_mode == CacheMode.EXPLICIT.value
 
     @property
     def healthy(self) -> bool:
@@ -62,54 +75,8 @@ def _builder() -> PrefixBuilder:
     )
 
 
-async def _probe_responses(
-    settings: Settings, model: str, builder: PrefixBuilder, instruction: str, r: DoctorReport
-) -> DoctorReport:
-    """Responses-API models (T4) don't go through LLMClient at all — see
-    engine.find()'s branch on RESPONSES_API_MODELS — so this probes the
-    adapter directly instead. `cache_write_tokens` stays 0 here: this API has
-    no separate write signal, just a `cached_tokens` count on reads."""
-    try:
-        adapter = build_adapter(settings)
-    except ValueError as e:
-        r.errors.append(str(e))
-        return r
-
-    input_ = to_responses_input(builder.system(), builder.messages(instruction))
-    usage_total = Usage()
-
-    try:
-        first = await adapter.structured_call(
-            model=model, schema=Probe, input=input_, effort="low", max_tokens=256, label="doctor-1"
-        )
-        r.reachable = True
-        r.effort_accepted = True
-        r.structured_outputs = isinstance(first.parsed, Probe)
-        usage_total = usage_total + first.usage
-    except Exception as e:  # noqa: BLE001 - a probe reports every failure verbatim
-        r.errors.append(f"{type(e).__name__}: {e}")
-        return r
-
-    # Call 2 — identical prefix. If this endpoint caches at all, this is where it'd show.
-    try:
-        second = await adapter.structured_call(
-            model=model, schema=Probe, input=input_, effort="low", max_tokens=256, label="doctor-2"
-        )
-        r.cache_read_tokens = second.usage.cache_read_input_tokens
-        usage_total = usage_total + second.usage
-    except Exception as e:  # noqa: BLE001
-        r.errors.append(f"second call failed: {type(e).__name__}: {e}")
-
-    in_rate, out_rate = RATES.get(model, (3.00, 15.00))
-    write_mult, read_mult = CACHE_MULTIPLIERS.get(model, (1.25, 0.10))
-    r.cost_usd = usage_total.cost_usd(
-        in_rate, out_rate, cache_write_multiplier=write_mult, cache_read_multiplier=read_mult
-    )
-    return r
-
-
 async def _probe(settings: Settings, model: str) -> DoctorReport:
-    r = DoctorReport(provider=settings.provider, model=model)
+    r = DoctorReport(model=model)
 
     unfilled = settings.unfilled()
     if unfilled:
@@ -121,19 +88,42 @@ async def _probe(settings: Settings, model: str) -> DoctorReport:
         )
         return r
 
-    builder = _builder()
-    instruction = 'Reply with ok=true and note="probe".'
-
-    if model in RESPONSES_API_MODELS:
-        return await _probe_responses(settings, model, builder, instruction, r)
-
     try:
         client = LLMClient(pool=build_pool(settings), max_concurrency=2)
     except ValueError as e:
         r.errors.append(str(e))
         return r
+    return await probe(client, model, r)
 
-    # Call 1 — writes the cache.
+
+async def probe(
+    client: LLMClient,
+    model: str,
+    r: DoctorReport | None = None,
+    *,
+    check_cache: bool = True,
+) -> DoctorReport:
+    """Two identical structured calls through `client`: the first proves the
+    endpoint, the key and schema-enforced output; the second shows whether the
+    prefix was cached. Works on any pool — the deployment's or a customer's.
+    `check_cache=False` skips the second call when only reachability matters."""
+    r = r or DoctorReport(model=model)
+    try:
+        spec = client.spec(model)
+    except ValueError as e:
+        r.errors.append(str(e))
+        return r
+
+    r.provider = PROVIDERS[spec.provider].label
+    r.wire = spec.wire.value
+    r.cache_mode = spec.cache.value
+    r.known = spec.known
+    r.effort_supported = spec.supports_effort
+
+    builder = _builder()
+    instruction = 'Reply with ok=true and note="probe".'
+
+    # Call 1 — writes the cache where caching is explicit.
     try:
         first = await client.parse(
             model=model,
@@ -141,15 +131,20 @@ async def _probe(settings: Settings, model: str) -> DoctorReport:
             system=builder.system(),
             messages=builder.messages(instruction),
             effort="low",
-            max_tokens=256,
+            max_tokens=_PROBE_MAX_TOKENS,
             label="doctor-1",
         )
         r.reachable = True
-        r.effort_accepted = True
+        r.effort_accepted = r.effort_supported
         r.structured_outputs = isinstance(first.parsed, Probe)
         r.cache_write_tokens = first.usage.cache_creation_input_tokens
     except Exception as e:  # noqa: BLE001 - a probe reports every failure verbatim
         r.errors.append(f"{type(e).__name__}: {e}")
+        r.cost_usd = client.total_cost_usd()
+        return r
+
+    if not check_cache:
+        r.cost_usd = client.total_cost_usd()
         return r
 
     # Call 2 — identical prefix, so it must read the cache. This is the real test.
@@ -160,14 +155,14 @@ async def _probe(settings: Settings, model: str) -> DoctorReport:
             system=builder.system(),
             messages=builder.messages(instruction),
             effort="low",
-            max_tokens=256,
+            max_tokens=_PROBE_MAX_TOKENS,
             label="doctor-2",
         )
         r.cache_read_tokens = second.usage.cache_read_input_tokens
     except Exception as e:  # noqa: BLE001
         r.errors.append(f"second call failed: {type(e).__name__}: {e}")
 
-    r.cost_usd = client.cost_usd(model)
+    r.cost_usd = client.total_cost_usd()
     return r
 
 

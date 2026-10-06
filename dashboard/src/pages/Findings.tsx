@@ -9,6 +9,7 @@ import { FilterBar, PageHeader } from "../components/Layout";
 import { Badge, Card, SearchInput, Select, Tooltip } from "../components/ui";
 import { api, type Finding, type Page } from "../lib/api";
 import { SEVERITY_ORDER, SEVERITY_VAR, fmtPct } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 const CATEGORIES = [
   "correctness",
@@ -45,7 +46,9 @@ export function FindingsPage() {
     return () => clearTimeout(id);
   }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const { account } = useWorkspace();
   const params = {
+    account,
     limit: t.limit,
     offset: t.offset,
     severity: t.get("severity"),
@@ -58,12 +61,14 @@ export function FindingsPage() {
   const { data, isFetching, error, refetch } = useQuery<Page<Finding>>({
     queryKey: ["findings", params],
     queryFn: () => api.findings(params),
+    enabled: Boolean(account),
     placeholderData: keepPreviousData,
   });
 
   const { data: facets } = useQuery({
-    queryKey: ["run-facets"],
-    queryFn: api.runFacets,
+    queryKey: ["run-facets", account],
+    queryFn: () => api.runFacets(account),
+    enabled: Boolean(account),
     staleTime: 300_000,
   });
 
@@ -137,7 +142,7 @@ export function FindingsPage() {
     <>
       <PageHeader
         title="Findings"
-        description="Every defect CR has reported, across all reviews — including the ones it decided not to post."
+        description="Every defect PullAgent has reported, across all reviews — including the ones it decided not to post."
       />
 
       <FilterBar>
