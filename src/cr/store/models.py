@@ -23,7 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _now() -> datetime:
@@ -39,10 +39,15 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     repo: Mapped[str] = mapped_column(String(255), index=True)
+    # The workspace that owns the run: the repository's owner, the account the
+    # App is installed on. Every dashboard query filters on it.
+    account: Mapped[str] = mapped_column(String(255), default="", index=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     head_sha: Mapped[str] = mapped_column(String(64), default="")
     tier: Mapped[str] = mapped_column(String(8), default="")
-    model: Mapped[str] = mapped_column(String(64), default="")
+    # 255: a run on a customer's own key records `conn:<id>:<model>`, and
+    # model names on those connections run long.
+    model: Mapped[str] = mapped_column(String(255), default="")
 
     # Where the run came from: pr | local | eval | bench. Without this the ledger
     # cannot tell a paid customer review from a benchmark sweep.
@@ -78,6 +83,12 @@ class Run(Base):
     # closed this row, so it cannot be part of cost_usd at finish_run() time.
     # Real `cr review-pr` usage never sets this; only benchmark runs do.
     judge_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # "managed" (our keys) or "byok" (the customer's). Spend limits apply to
+    # the first only; the second is tracked so the customer can see it.
+    billing: Mapped[str] = mapped_column(String(16), default="managed", index=True)
+    # [{"model", "label", "provider", "calls", "input_tokens", "output_tokens",
+    #   "cost_usd", "priced"}] — see cr.models.ModelCost.
+    model_costs: Mapped[list] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
@@ -231,6 +242,13 @@ class User(Base):
     avatar_url: Mapped[str] = mapped_column(Text, default="")
     email: Mapped[str] = mapped_column(String(320), default="")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    # GitHub organisations the user belonged to at their last sign-in. This is
+    # what lets someone manage their org's API keys and tiers: membership is
+    # re-read on every sign-in, so leaving the org revokes it within one session.
+    orgs: Mapped[list] = mapped_column(JSON, default=list)
+    # The subset of `orgs` the user administers on GitHub. Members may view an
+    # org's workspace; only its admins may change its keys, tiers and routing.
+    admin_orgs: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -304,3 +322,92 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ProviderConnection(Base):
+    """A customer's own provider account: one API key and the models they use
+    through it (bring-your-own-key).
+
+    The key is stored only as ciphertext (see `cr.vault`); `hint` is its last
+    four characters, which is all the dashboard ever shows. `models` is the
+    list the customer entered — catalog names or their own deployment names —
+    each with what its connection test learned:
+
+        [{"name": "gpt-6-luna", "effort": true, "tested_at": "..."}]
+
+    An account may hold several connections to one provider, e.g. two Azure
+    resources.
+    """
+
+    __tablename__ = "provider_connections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(255), index=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    label: Mapped[str] = mapped_column(String(64), default="")
+    ciphertext: Mapped[str] = mapped_column(Text)
+    hint: Mapped[str] = mapped_column(String(16), default="")
+    # Azure only: the resource name the fixed URL template is built from.
+    resource: Mapped[str] = mapped_column(String(64), default="")
+    models: Mapped[list] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(255), default="")
+    tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class CustomTier(Base):
+    """A review configuration an account built for itself: which model and
+    effort each agent uses, which lenses run, how many comments to post.
+    `config` is a validated `cr.app.workspace.TierSpec`."""
+
+    __tablename__ = "custom_tiers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(255), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (UniqueConstraint("account", "name", name="uq_custom_tier"),)
+
+
+class RoutingRules(Base):
+    """Where an account forces its own tiers. A repository rule beats the
+    account-wide one; with neither, the repository runs CR's managed presets.
+
+        {"all": <tier id> | null, "repos": {"owner/name": <tier id>}}
+    """
+
+    __tablename__ = "routing_rules"
+
+    account: Mapped[str] = mapped_column(String(255), primary_key=True)
+    rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_by: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class KeyTest(Base):
+    """One "test connection" probe, kept so the hourly limit holds across
+    replicas and restarts rather than living in one process's memory."""
+
+    __tablename__ = "key_tests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(255), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
+class RepoSettings(Base):
+    """Per-repository review settings the owner writes, e.g. guidelines that go
+    into every review's (cached) system prompt for that repository."""
+
+    __tablename__ = "repo_settings"
+
+    repo: Mapped[str] = mapped_column(String(255), primary_key=True)
+    account: Mapped[str] = mapped_column(String(255), index=True)
+    guidelines: Mapped[str] = mapped_column(Text, default="")
+    updated_by: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

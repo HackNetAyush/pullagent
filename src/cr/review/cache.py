@@ -43,7 +43,7 @@ def review_key(
         "endpoint": cfg.azure_base_url or cfg.azure_resource,
         "finder_endpoint": cfg.finder_base_url,
         "verifier_endpoint": cfg.verifier_base_url,
-        "openai_endpoint": cfg.openai_base_url,
+        "azure_openai_endpoint": cfg.azure_openai_base_url,
     }
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 

@@ -15,17 +15,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from cr.app import accounts, conversation, events, jobs, manifest
+from cr.app import workspace as ws
 from cr.app.auth import AppAuth, AuthError
-from cr.app.authroutes import build_auth_router
+from cr.app.authroutes import build_auth_router, current_user
 from cr.app.jobs import JobQueue, QueuedJob, index_key, reply_key, review_key
 from cr.app.runner import run_index_job, run_review_job
+from cr.app.workspace_routes import _ACCOUNT, Scope, _visible, actor, workspace_scope
 from cr.config import Settings
 from cr.config import settings as default_settings
 from cr.server import guard as dashboard_guard
@@ -37,6 +41,10 @@ log = logging.getLogger(__name__)
 # large repo; an org install granting 300 repos must not become a 6-hour
 # stampede. The rest index lazily on their first review.
 MAX_EAGER_INDEX = 20
+
+# The dashboard asks GitHub about one account at most this often (per
+# process), however many tabs or clicks ask.
+INSTALL_CHECK_S = 5.0
 
 
 class AppService:
@@ -56,6 +64,9 @@ class AppService:
         # host (a smee.io-style relay). Blank means "<public_url>/webhook".
         self.webhook_url: str = ""
         self.started = False
+        # In-flight installation checks, so concurrent tabs share one.
+        self._checks: dict[str, asyncio.Future[bool]] = {}
+        self._checked: dict[str, float] = {}
         # asyncio holds only a weak reference to a running task, so a
         # fire-and-forget background job can be garbage-collected mid-flight.
         self._background: set[asyncio.Task] = set()
@@ -97,6 +108,8 @@ class AppService:
         """
         if self._auth is None:
             self._auth = AppAuth.from_settings(self.settings)
+        if self._auth.on_gone is None:
+            self._auth.on_gone = self._installation_gone
         return self._auth
 
     def _forget(self, installation_id: int) -> None:
@@ -134,6 +147,7 @@ class AppService:
         self.started = True
 
         if self.configured:
+            self.spawn(self._refresh_identity())
             self.spawn(self._sync_installations())
         else:
             log.warning(
@@ -153,42 +167,150 @@ class AppService:
             await self._auth.aclose()
         self.started = False
 
-    async def _sync_installations(self) -> None:
-        """Reconcile with GitHub at start-up.
+    async def _refresh_identity(self) -> None:
+        """Pick up the App's current slug from GitHub.
 
-        Installation webhooks that arrived while this server was down are
-        gone; without this the App would not know which repos it owns until
-        someone opened a PR.
+        The slug is part of every install link, and it changes when the App is
+        renamed. The one saved at setup goes stale silently, sending people to
+        the install page of a name that no longer exists. GitHub is the
+        authority here, over both the saved file and CR_GITHUB_APP_SLUG.
         """
         try:
-            for inst in await self.auth().list_installations():
-                iid = inst["id"]
-                account = (inst.get("account") or {}).get("login", "")
-                repos = await self.auth().list_installation_repos(iid)
-                store.upsert_installation(
-                    iid,
-                    account=account,
-                    account_type=(inst.get("account") or {}).get("type", ""),
-                    repos=repos,
-                    repo_selection=inst.get("repository_selection", ""),
-                    suspended=bool(inst.get("suspended_at")),
-                    removed=False,
-                )
-                # Make the account visible to an admin without approving it.
-                # An install we never recorded is one nobody can act on: the
-                # owner sees silence and the approval queue stays empty.
-                if account:
-                    store.record_account(
-                        account, account_type=(inst.get("account") or {}).get("type", "")
-                    )
-                log.info(
-                    "installation %s (%s): %d repo(s) [%s]",
-                    iid,
-                    account,
-                    len(repos),
-                    store.account_status(account) if account else "no account",
-                )
-        except Exception as e:  # noqa: BLE001 - start-up reconciliation is best-effort
+            meta = await self.auth().app_metadata()
+        except Exception as e:  # noqa: BLE001 - a stale link beats a failed start
+            log.warning("could not read the App's slug from GitHub: %s", e)
+            return
+        slug = meta.get("slug") or ""
+        if not slug:
+            return
+        if slug != self.settings.github_app_slug:
+            log.info("App slug is now %r (was %r)", slug, self.settings.github_app_slug)
+            self.settings.github_app_slug = slug
+        try:
+            manifest.update_identity(
+                self.settings.credentials_path(), slug=slug, name=meta.get("name") or ""
+            )
+        except OSError as e:
+            log.warning("could not update the saved App credentials: %s", e)
+
+    # --- installations ------------------------------------------------------
+    #
+    # Webhooks are how installs and uninstalls reach us. What they can miss is
+    # covered without polling: the start-up sync catches anything that happened
+    # while we were down, a token GitHub refuses with 404 marks that
+    # installation gone (`AppAuth.on_gone`), and `check_account` answers the
+    # one question a person can be waiting on - "I just installed it; does it
+    # know?" - before the webhook lands, or where it never will (a laptop).
+
+    async def check_account(self, account: str, *, account_type: str = "") -> bool:
+        """Whether the App is installed on `account`, according to GitHub.
+
+        Brings our record in line with the answer. One call, for one account;
+        concurrent calls share it and repeats within INSTALL_CHECK_S reuse our
+        record instead of asking again.
+        """
+        key = account.lower()
+        running = self._checks.get(key)
+        if running is not None:
+            return await asyncio.shield(running)
+        task = asyncio.ensure_future(self._check_account(account, account_type))
+        self._checks[key] = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if self._checks.get(key) is task:
+                self._checks.pop(key, None)
+
+    def _recorded(self, account: str) -> bool:
+        return any(i.account.lower() == account.lower() for i in store.installations())
+
+    async def _check_account(self, account: str, account_type: str) -> bool:
+        if not self.configured:
+            return self._recorded(account)
+        key = account.lower()
+        if time.monotonic() - self._checked.get(key, float("-inf")) < INSTALL_CHECK_S:
+            return self._recorded(account)
+        self._checked[key] = time.monotonic()
+        try:
+            inst = await self.auth().account_installation(account, account_type)
+        except Exception as e:  # noqa: BLE001 - our record stands until GitHub answers
+            log.warning("could not check the installation on %s: %s", account, e)
+            return self._recorded(account)
+
+        if inst is None:
+            for iid in store.remove_account_installations(account):
+                self._forget(iid)
+                log.info("installation %s (%s) is no longer on GitHub", iid, account)
+            return False
+        known = {i.id: i for i in store.installations()}
+        await self._record_installation(inst, known=known.get(inst["id"]))
+        return True
+
+    async def _record_installation(self, inst: dict, *, known: Any = None) -> None:
+        """Record one installation as GitHub describes it.
+
+        Its repositories are read only when it is new to us or its state
+        changed: they cost a call per hundred, and the
+        `installation_repositories` webhooks keep a known one current.
+        """
+        iid = inst["id"]
+        owner = inst.get("account") or {}
+        account, account_type = owner.get("login", ""), owner.get("type", "")
+        suspended = bool(inst.get("suspended_at"))
+        fresh = known is None or known.suspended != suspended
+        repos = await self.auth().list_installation_repos(iid) if fresh else None
+        store.upsert_installation(
+            iid,
+            account=account,
+            account_type=account_type,
+            repos=repos,
+            repo_selection=inst.get("repository_selection", ""),
+            suspended=suspended,
+            removed=False,
+        )
+        if suspended:
+            self._forget(iid)
+        # Make the account visible to an admin without approving it. An
+        # install we never recorded is one nobody can act on: the owner sees
+        # silence and the approval queue stays empty.
+        if account:
+            store.record_account(account, account_type=account_type)
+        if fresh:
+            log.info(
+                "installation %s (%s): %d repo(s) [%s]",
+                iid,
+                account,
+                len(repos or []),
+                store.account_status(account) if account else "no account",
+            )
+
+    def _installation_gone(self, installation_id: int) -> None:
+        """GitHub refused a token for this installation: it was uninstalled."""
+        store.upsert_installation(installation_id, removed=True)
+        log.info("installation %s is gone; recorded as removed", installation_id)
+
+    async def _sync_installations(self) -> None:
+        """Reconcile every installation with GitHub, at start-up.
+
+        Installation webhooks that arrived while this server was down are
+        gone; this catches the installs and uninstalls they carried. Only a
+        complete listing is used to mark installations removed.
+        """
+        try:
+            listing, complete = await self.auth().all_installations()
+            known = {i.id: i for i in store.installations()}
+            if complete:
+                live = {inst["id"] for inst in listing}
+                for iid, row in known.items():
+                    if iid not in live:
+                        store.upsert_installation(iid, removed=True)
+                        self._forget(iid)
+                        log.info("installation %s (%s) is no longer on GitHub", iid, row.account)
+            else:
+                log.warning("installation listing was cut short; not checking for removals")
+            for inst in listing:
+                await self._record_installation(inst, known=known.get(inst["id"]))
+        except Exception as e:  # noqa: BLE001 - reconciliation is best-effort
             log.warning("could not sync installations: %s", e)
 
     # --- the worker ---------------------------------------------------------
@@ -450,8 +572,20 @@ def build_router(service: AppService) -> APIRouter:
     # /webhook and the setup routes stay open: GitHub has no session, and
     # setup runs before any user exists.
     @router.get("/api/app/status", dependencies=[Depends(dashboard_guard)])
-    def status() -> dict[str, Any]:
-        insts = store.installations()
+    def status(sc: Scope = Depends(workspace_scope)) -> dict[str, Any]:
+        insts = [i for i in store.installations() if sc.allows(i.account)]
+
+        def mine(key: str) -> bool:
+            # Queue keys look like "review:owner/name#42".
+            return sc.account is None or key.split(":", 1)[-1].lower().startswith(
+                sc.account.lower() + "/"
+            )
+
+        snapshot = service.queue.snapshot()
+        if isinstance(snapshot.get("waiting"), list):
+            snapshot["waiting"] = [w for w in snapshot["waiting"] if mine(w.get("key", ""))]
+        if isinstance(snapshot.get("running"), list):
+            snapshot["running"] = [k for k in snapshot["running"] if mine(k)]
         return {
             "configured": service.configured,
             "app_id": s.github_app_id or "",
@@ -472,7 +606,7 @@ def build_router(service: AppService) -> APIRouter:
                 }
                 for i in insts
             ],
-            "queue": service.queue.snapshot(),
+            "queue": snapshot,
         }
 
     @router.get("/api/app/jobs", dependencies=[Depends(dashboard_guard)])
@@ -482,9 +616,10 @@ def build_router(service: AppService) -> APIRouter:
         kind: str | None = None,
         status: str | None = None,
         repo: str | None = None,
+        sc: Scope = Depends(workspace_scope),
     ) -> dict[str, Any]:
         rows, total = store.jobs_page(
-            limit=limit, offset=offset, kind=kind, status=status, repo=repo
+            limit=limit, offset=offset, kind=kind, status=status, repo=repo, account=sc.account
         )
         return {
             "items": [
@@ -522,7 +657,7 @@ def build_router(service: AppService) -> APIRouter:
         return None
 
     @router.get("/app/setup", response_class=HTMLResponse)
-    def setup(request: Request, org: str = "", name: str = "CR code review") -> Response:
+    def setup(request: Request, org: str = "", name: str = "PullAgent") -> Response:
         if (blocked := setup_blocked()) is not None:
             return blocked
         public = service.public_url or str(request.base_url).rstrip("/")
@@ -557,6 +692,46 @@ def build_router(service: AppService) -> APIRouter:
         # Pick up the installations this App already has, if any.
         service.spawn(service._sync_installations())
         return HTMLResponse(manifest.done_page(creds, path))
+
+    @router.post("/api/workspaces/{account}/installation/check")
+    async def check_installation(account: str, who: ws.Actor = Depends(actor)) -> dict[str, Any]:
+        """Is the App installed on this workspace? Asks GitHub, so an install
+        shows before its webhook arrives (or where it never will)."""
+        if not _ACCOUNT.match(account):
+            raise HTTPException(status_code=400, detail="check one workspace at a time")
+        account = _visible(account, who)
+        kind = (
+            "User"
+            if account.lower() == who.login.lower()
+            else "Organization"
+            if account.lower() in {o.lower() for o in who.orgs}
+            else ""
+        )
+        installed = await service.check_account(account, account_type=kind)
+        return {"account": account, "installed": installed}
+
+    @router.get("/app/installed")
+    async def installed(request: Request, installation_id: int | None = None) -> Response:
+        """The App's Setup URL: GitHub sends the browser here after an install.
+
+        `installation_id` is only a hint of which installation to look up: what
+        is recorded is what GitHub itself returns for it. Only a signed-in
+        browser gets the lookup, so this open URL cannot spend the App's rate
+        limit; anyone else lands on the dashboard, which checks on its own.
+        """
+        signed_in = not accounts.configured(s) or current_user(request) is not None
+        key = f"#{installation_id}"
+        recent = time.monotonic() - service._checked.get(key, float("-inf")) < INSTALL_CHECK_S
+        if installation_id and service.configured and signed_in and not recent:
+            service._checked[key] = time.monotonic()
+            try:
+                inst = await asyncio.wait_for(service.auth().installation(installation_id), 10)
+                if inst is not None:
+                    known = {i.id: i for i in store.installations()}
+                    await service._record_installation(inst, known=known.get(inst["id"]))
+            except Exception as e:  # noqa: BLE001 - the dashboard checks again anyway
+                log.warning("could not look up installation %s: %s", installation_id, e)
+        return RedirectResponse("/")
 
     @router.get("/app/install")
     def install() -> Response:
@@ -674,7 +849,6 @@ def reloadable_app() -> FastAPI:
     """Factory for `uvicorn --reload`, which needs an import string rather than
     an object. The public URL travels by env var because there is nowhere else
     to put it when uvicorn re-imports this module in a fresh process."""
-    import os
 
     return create_app(
         public_url=os.environ.get("CR_APP_PUBLIC_URL", ""),

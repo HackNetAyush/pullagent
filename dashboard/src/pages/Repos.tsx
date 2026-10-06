@@ -9,6 +9,7 @@ import { FilterBar, PageHeader } from "../components/Layout";
 import { Card, SearchInput } from "../components/ui";
 import { api, type Page, type RepoRow } from "../lib/api";
 import { fmtInt, fmtUSD, relTime } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 /**
  * The repository rollup. A team does not think in "review #412" — it thinks in
@@ -28,11 +29,14 @@ export function ReposPage() {
     return () => clearTimeout(id);
   }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const params = { limit: t.limit, offset: t.offset, q: t.get("q") };
+  const { account } = useWorkspace();
+  const params = {
+    account, limit: t.limit, offset: t.offset, q: t.get("q") };
 
   const { data, isFetching, error, refetch } = useQuery<Page<RepoRow>>({
     queryKey: ["repos", params],
     queryFn: () => api.repos(params),
+    enabled: Boolean(account),
     placeholderData: keepPreviousData,
   });
 

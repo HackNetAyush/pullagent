@@ -26,8 +26,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
@@ -52,6 +55,26 @@ TOKEN_SKEW_S = 120
 
 class AuthError(RuntimeError):
     """The App cannot authenticate. Distinct from a repo-level 403."""
+
+
+class InstallationGone(AuthError):
+    """GitHub says the installation does not exist: the App was uninstalled."""
+
+    def __init__(self, installation_id: int) -> None:
+        super().__init__(
+            f"installation {installation_id} does not exist for this App. "
+            "It was probably uninstalled."
+        )
+        self.installation_id = installation_id
+
+
+# The installation listing stops after this many pages of 100. A listing that
+# fills them all may be cut short, so nothing can be read into what it lacks.
+INSTALLATION_PAGES = 100
+
+# A GitHub login: what may go into an API path. Anything else is refused
+# before it reaches GitHub.
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 
 class Secret:
@@ -117,6 +140,9 @@ class AppAuth:
         default_factory=dict, repr=False
     )
     _client: httpx.AsyncClient | None = field(default=None, repr=False)
+    # Told when GitHub says an installation no longer exists, so the record
+    # of it can be dropped by whoever owns that record.
+    on_gone: Callable[[int], None] | None = field(default=None, repr=False)
 
     @classmethod
     def from_settings(cls, s: Settings | None = None) -> AppAuth:
@@ -215,10 +241,13 @@ class AppAuth:
                 "GitHub rejected the App JWT. Check CR_GITHUB_APP_ID matches the private key."
             )
         if r.status_code == 404:
-            raise AuthError(
-                f"installation {installation_id} does not exist for this App. "
-                "It was probably uninstalled."
-            )
+            self.forget(installation_id)
+            if self.on_gone is not None:
+                try:
+                    self.on_gone(installation_id)
+                except Exception as e:  # noqa: BLE001 - the 404 is the news; report it
+                    log.warning("could not record installation %s as gone: %s", installation_id, e)
+            raise InstallationGone(installation_id)
         if r.status_code == 422 and scope:
             # The installation does not grant one of these repos. Retry
             # unscoped rather than failing: a narrower token is an
@@ -251,27 +280,87 @@ class AppAuth:
 
     # --- App-level reads ----------------------------------------------------
 
+    def _as_app(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.app_jwt()}"}
+
     async def app_metadata(self) -> dict:
-        r = await self._http().get("/app", headers={"Authorization": f"Bearer {self.app_jwt()}"})
+        r = await self._http().get("/app", headers=self._as_app())
         r.raise_for_status()
         return r.json()
 
-    async def list_installations(self) -> list[dict]:
+    async def all_installations(self) -> tuple[list[dict], bool]:
+        """Every installation of this App, and whether the listing is complete.
+
+        Only a complete listing says anything about what is missing from it.
+        A failed page raises rather than returning what was read so far.
+        """
         out: list[dict] = []
-        page = 1
-        while page <= 10:
+        for page in range(1, INSTALLATION_PAGES + 1):
             r = await self._http().get(
                 "/app/installations",
                 params={"per_page": 100, "page": page},
-                headers={"Authorization": f"Bearer {self.app_jwt()}"},
+                headers=self._as_app(),
             )
             r.raise_for_status()
             batch = r.json()
             out.extend(batch)
             if len(batch) < 100:
-                break
-            page += 1
-        return out
+                return out, True
+        return out, False
+
+    async def list_installations(self) -> list[dict]:
+        return (await self.all_installations())[0]
+
+    async def installation(self, installation_id: int) -> dict | None:
+        """One installation by id, or None if it does not exist for this App."""
+        r = await self._http().get(
+            f"/app/installations/{int(installation_id)}", headers=self._as_app()
+        )
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+    async def account_installation(self, login: str, account_type: str = "") -> dict | None:
+        """This App's installation on one account, or None if it has none.
+
+        One call however many accounts have installed the App, which is what
+        makes it cheap enough to ask whenever someone opens the dashboard.
+        GitHub has a route for users and one for organisations; when the kind
+        of account is unknown, both are tried.
+        """
+        if not _LOGIN.match(login or ""):
+            raise ValueError(f"not a GitHub login: {login!r}")
+        kinds = ["orgs", "users"] if account_type == "Organization" else ["users", "orgs"]
+        if account_type in ("User", "Organization"):
+            kinds = kinds[:1]
+        for kind in kinds:
+            r = await self._http().get(f"/{kind}/{login}/installation", headers=self._as_app())
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            return r.json()
+        return None
+
+    # --- webhook deliveries -------------------------------------------------
+
+    async def hook_config(self) -> dict:
+        """Where GitHub sends this App's webhooks. Includes no secret."""
+        r = await self._http().get("/app/hook/config", headers=self._as_app())
+        r.raise_for_status()
+        return r.json()
+
+    async def hook_deliveries(self, *, cursor: str = "") -> tuple[list[dict], str]:
+        """One page of recent webhook deliveries, newest first, and the cursor
+        for the next page ("" when there is none)."""
+        params: dict[str, str | int] = {"per_page": 100}
+        if cursor:
+            params["cursor"] = cursor
+        r = await self._http().get("/app/hook/deliveries", params=params, headers=self._as_app())
+        r.raise_for_status()
+        nxt = r.links.get("next", {}).get("url", "")
+        following = parse_qs(urlsplit(nxt).query).get("cursor", [""])[0] if nxt else ""
+        return r.json(), following
 
     async def list_installation_repos(self, installation_id: int) -> list[str]:
         """Full slugs of every repo an installation can reach.

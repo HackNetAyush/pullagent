@@ -9,6 +9,7 @@ import { FilterBar, PageHeader } from "../components/Layout";
 import { Badge, Card, SearchInput, Select, StatusDot } from "../components/ui";
 import { api, type Facets, type Page, type Run } from "../lib/api";
 import { STATUS_VAR, fmtInt, fmtSecs, fmtUSD, relTime } from "../lib/utils";
+import { useWorkspace } from "../workspace";
 
 /** Stage progress as a compact bar — a review has 9 stages and "which one" is
  *  the only question worth answering in a table cell. */
@@ -39,7 +40,9 @@ export function RunsPage() {
     return () => clearTimeout(id);
   }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const { account } = useWorkspace();
   const params = {
+    account,
     limit: t.limit,
     offset: t.offset,
     status: t.get("status"),
@@ -52,6 +55,7 @@ export function RunsPage() {
   const { data, isFetching, error, refetch } = useQuery<Page<Run>>({
     queryKey: ["runs", params],
     queryFn: () => api.runs(params),
+    enabled: Boolean(account),
     // Keeps the old page on screen while the next one loads, so paging does
     // not flash an empty table.
     placeholderData: keepPreviousData,
@@ -59,8 +63,9 @@ export function RunsPage() {
   });
 
   const { data: facets } = useQuery<Facets>({
-    queryKey: ["run-facets"],
-    queryFn: api.runFacets,
+    queryKey: ["run-facets", account],
+    queryFn: () => api.runFacets(account),
+    enabled: Boolean(account),
     staleTime: 300_000,
   });
 
@@ -97,7 +102,13 @@ export function RunsPage() {
         size: 88,
         cell: ({ row }) => (
           <div className="space-y-1">
-            <Badge>{row.original.tier || "—"}</Badge>
+            {row.original.billing === "byok" ? (
+              <Badge tone="brand" title={`Ran on your own API keys · ${row.original.model}`}>
+                Your keys
+              </Badge>
+            ) : (
+              <Badge>{row.original.tier || "—"}</Badge>
+            )}
             <p className="text-[11px] text-fg-faint">{row.original.source}</p>
           </div>
         ),
@@ -136,7 +147,7 @@ export function RunsPage() {
 
   return (
     <>
-      <PageHeader title="Reviews" description="Every review CR has run, newest first." />
+      <PageHeader title="Reviews" description="Every review PullAgent has run, newest first." />
 
       <FilterBar>
         <SearchInput

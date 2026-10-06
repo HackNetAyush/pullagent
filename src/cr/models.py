@@ -330,6 +330,21 @@ class CallTrace(BaseModel):
     error: str = ""
 
 
+class ModelCost(BaseModel):
+    """What one model cost in one review. Kept per run so spend can be shown
+    by model — and, for a customer's own keys, by their model names."""
+
+    model: str
+    label: str = ""
+    provider: str = ""
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    # False when no price is known, so $0 reads as "untracked", not "free".
+    priced: bool = True
+
+
 class ReviewResult(BaseModel):
     tier: str
     posted: list[VerifiedFinding] = Field(default_factory=list)
@@ -353,6 +368,7 @@ class ReviewResult(BaseModel):
     # "never met the proof obligation" with "collapsed into another finding".
     deduplicated: list[FilteredFinding] = Field(default_factory=list)
     calls: list[CallTrace] = Field(default_factory=list)
+    model_costs: list[ModelCost] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     cache_hit: bool = False
     cached_cost_usd: float = 0.0

@@ -14,18 +14,19 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from cr.config import Settings, TierConfig
 from cr.config import settings as default_settings
 from cr.diff import review_chunks
 from cr.llm.client import LLMClient, build_pool
-from cr.llm.openai_responses import RESPONSES_API_MODELS, build_adapter, find_via_responses
 from cr.llm.prefix import PRContext, PrefixBuilder, RepoContext
 from cr.models import (
     FilteredFinding,
     Finding,
     FindingList,
     MergeBatch,
+    ModelCost,
     ReviewResult,
     Usage,
     Verdict,
@@ -41,35 +42,42 @@ log = logging.getLogger(__name__)
 async def find(
     client: LLMClient, builder: PrefixBuilder, tier: TierConfig, s: Settings
 ) -> list[Finding]:
-    """Stage 6 — N specialist lenses over one shared cached prefix.
+    """Stage 6 — N specialist lenses over one shared prefix.
 
-    Staggered by `LLMClient.fanout` so the first pass writes the cache before the
-    rest read it. See PIPELINE.md §2.2.
+    On models with explicit caching, `LLMClient.fanout` staggers the first pass
+    so it writes the cache before the rest read it (PIPELINE.md §2.2); on every
+    other provider the lenses run at once. Either way the output contract is
+    the same, so nothing downstream knows which provider found what.
 
-    Tiers whose finder model speaks the Responses API (currently just T4) have
-    no shared cache to stagger for, so they run a separate path entirely — see
-    `find_via_responses`.
+    Lenses that share a model and effort fan out together over one prefix; a
+    custom tier that gives a lens its own model runs that lens as its own
+    group, concurrently with the rest.
     """
     # xhigh spends far more on thinking, and thinking draws from max_tokens.
     budget = tier.finder_max_tokens
 
-    if tier.model in RESPONSES_API_MODELS:
-        adapter = build_adapter(s)
-        return await find_via_responses(client, adapter, builder, tier, budget)
-
-    roles = [(lens, prompts.finder_instruction(lens)) for lens in tier.finders]
-    calls = await client.fanout(
-        model=tier.model,
-        schema=FindingList,
-        system=builder.system(),
-        message_builder=builder.messages,
-        roles=roles,
-        effort=tier.effort,
-        max_tokens=budget,
+    groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for lens in tier.finders:
+        # An owner-written lens carries its own instruction; built-ins use ours.
+        instruction = tier.finder_prompts.get(lens) or prompts.finder_instruction(lens)
+        groups.setdefault(tier.finder_route(lens), []).append((lens, instruction))
+    batches = await asyncio.gather(
+        *(
+            client.fanout(
+                model=model,
+                schema=FindingList,
+                system=builder.system(),
+                message_builder=builder.messages,
+                roles=roles,
+                effort=effort,
+                max_tokens=budget,
+            )
+            for (model, effort), roles in groups.items()
+        )
     )
 
     out: list[Finding] = []
-    for call in calls:
+    for call in (c for batch in batches for c in batch):
         if not isinstance(call.parsed, FindingList):
             continue
         for f in call.parsed.findings:
@@ -402,7 +410,7 @@ async def merge_colocated(
     if not groups:
         return findings
 
-    model = tier.verifier_model or tier.model
+    model, effort = tier.checker()
 
     async def judge(ids: list[int], pairs: list[tuple[int, int]]) -> set[frozenset[int]]:
         """One model call over a batch of pairs. Raises if the answer is unusable."""
@@ -418,7 +426,7 @@ async def merge_colocated(
             messages=builder.messages(
                 prompts.merge_instruction(json.dumps(payload), json.dumps(pairs_payload))
             ),
-            effort=tier.verifier_effort,
+            effort=effort,
             max_tokens=tier.verifier_max_tokens,
             label="merge",
         )
@@ -530,17 +538,19 @@ async def verify(
     prefix as the finders (the role instruction is the only thing that
     differs), so this stage is cheap in input and dominated by its own small
     outputs. Tiers that escalate verification to a different model (T3) or a
-    different provider entirely (T4, where there is no shared cache to reuse
-    at all — see `llm/openai_responses.py`) don't get that discount; their
-    cost model should assume a fresh warm here, not a free ride.
+    different provider entirely (T4) don't get that discount; their cost model
+    should assume a fresh warm here, not a free ride. Any registered model can
+    verify — the provider is resolved per call, not per stage.
 
     The verifier sees the same code but never the finder's reasoning — that is
     what makes the judgement independent.
     """
-    model = tier.verifier_model or tier.model
     by_id: dict[int, list[Verdict]] = {i: [] for i in range(len(findings))}
 
     async def batch(ids: list[int], lens: str, adjudicate: bool = False) -> None:
+        # Each lens may run on its own model; adjudication weighs every lens's
+        # verdict, so it runs on the tier's verifier defaults.
+        model, effort = tier.checker() if adjudicate else tier.verifier_route(lens)
         payload = []
         for i in ids:
             item = {
@@ -558,10 +568,12 @@ async def verify(
                 system=builder.system(),
                 messages=builder.messages(
                     prompts.batch_verifier_instruction(
-                        lens, json.dumps(payload, ensure_ascii=False)
+                        lens,
+                        json.dumps(payload, ensure_ascii=False),
+                        None if adjudicate else tier.verifier_prompts.get(lens),
                     )
                 ),
-                effort=tier.verifier_effort,
+                effort=effort,
                 max_tokens=tier.verifier_max_tokens,
                 label=label,
             )
@@ -722,6 +734,33 @@ def gate(
     )
 
 
+def model_costs(llm: Any) -> list[ModelCost]:
+    """Per-model spend for one run, from the client's call traces."""
+    out: dict[str, ModelCost] = {}
+    for c in getattr(llm, "calls", []) or []:
+        mc = out.get(c.model)
+        if mc is None:
+            label, provider, priced = c.model, "", True
+            if hasattr(llm, "spec"):
+                try:
+                    spec = llm.spec(c.model)
+                    label, provider, priced = spec.label, spec.provider, spec.priced
+                except ValueError:
+                    pass
+            mc = out[c.model] = ModelCost(
+                model=c.model, label=label, provider=provider, priced=priced
+            )
+        mc.calls += 1
+        mc.input_tokens += (
+            c.usage.input_tokens
+            + c.usage.cache_read_input_tokens
+            + c.usage.cache_creation_input_tokens
+        )
+        mc.output_tokens += c.usage.output_tokens
+        mc.cost_usd += c.cost_usd
+    return list(out.values())
+
+
 async def review(
     *,
     repo: RepoContext,
@@ -758,6 +797,7 @@ async def review(
             head_sha=head_sha,
             source=source,
             actor=actor,
+            billing="byok" if tier.custom else "managed",
         )
         if record
         else None
@@ -903,6 +943,7 @@ async def review(
         + [v.reasoning for vf in verified for v in vf.verdicts if v.infrastructure_error],
         review_key=key,
         run_id=run_id,
+        model_costs=model_costs(llm),
     )
     if cache_enabled:
         cache.save(result)

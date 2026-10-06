@@ -244,7 +244,11 @@ async def _draft_reply(
         diff=f"# {path}\n{diff}" if path else diff,
         graph_slice=graph_slice,
     )
-    builder = PrefixBuilder(preamble=prompts.REPLY_PREAMBLE, repo=RepoContext(slug=repo), pr=pr)
+    builder = PrefixBuilder(
+        preamble=prompts.REPLY_PREAMBLE,
+        repo=RepoContext(slug=repo, guidelines=store.repo_guidelines(repo)),
+        pr=pr,
+    )
     try:
         call = await llm.parse(
             model=model,

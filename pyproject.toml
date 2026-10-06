@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.70",
     "openai>=1.50",
+    # Encrypts customer API keys at rest (cr.vault).
+    "cryptography>=43",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "typer>=0.15",
@@ -62,9 +64,15 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # FastAPI's dependency-injection idiom *is* a call in an argument default.
 "src/cr/app/authroutes.py" = ["B008"]
+"src/cr/app/workspace_routes.py" = ["B008"]
+"src/cr/app/service.py" = ["B008"]
+"src/cr/server.py" = ["B008"]
 # Sharing a fixture across test modules means importing a name pytest then
 # rebinds as a parameter, which reads as a redefinition and is not one.
 "tests/conftest.py" = ["F401"]
+# Reuses test_workspace's store and fake-provider fixtures by importing them.
+"tests/test_customization.py" = ["F401", "F811"]
+"tests/test_installations.py" = ["F401", "F811"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

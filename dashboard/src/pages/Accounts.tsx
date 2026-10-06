@@ -141,7 +141,7 @@ export function AccountsPage() {
     <>
       <PageHeader
         title="Access"
-        description="Which GitHub accounts CR will review for. Nothing is reviewed for an account that is not approved."
+        description="Which GitHub accounts PullAgent will review for. Nothing is reviewed for an account that is not approved."
         actions={
           pending > 0 ? (
             <Badge className="bg-warning/15 text-warning">

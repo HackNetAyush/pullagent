@@ -60,6 +60,9 @@ PERMISSIONS: dict[str, str] = {
     "checks": "write",
     # Implicit for any App, listed for honesty.
     "metadata": "read",
+    # Org roles at sign-in: members may view an org's dashboard, only its
+    # admins may change its API keys, tiers and routing.
+    "members": "read",
 }
 
 # Events to subscribe to. `installation` and `installation_repositories` are
@@ -112,7 +115,7 @@ class SetupFlow:
 
 
 def build_manifest(
-    public_url: str, *, webhook_url: str = "", name: str = "CR code review"
+    public_url: str, *, webhook_url: str = "", name: str = "PullAgent"
 ) -> dict[str, Any]:
     """The App we want GitHub to create.
 
@@ -136,6 +139,10 @@ def build_manifest(
         "url": base,
         "hook_attributes": {"url": hook, "active": True},
         "redirect_url": f"{base}/app/setup/callback",
+        # Back to the dashboard after an install, which checks GitHub for it
+        # rather than waiting on the webhook.
+        "setup_url": f"{base}/app/installed",
+        "setup_on_update": True,
         "public": False,
         "default_permissions": PERMISSIONS,
         "default_events": EVENTS,
@@ -206,6 +213,25 @@ def load_credentials(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def update_identity(path: Path, *, slug: str, name: str) -> bool:
+    """Record the App's current slug and name in the saved credentials.
+
+    Both change when the App is renamed on GitHub, and nothing tells us: no
+    webhook fires. Only these two fields are rewritten; the secrets are left
+    exactly as they were. Returns whether anything changed.
+    """
+    path = Path(path).expanduser()
+    creds = load_credentials(path)
+    if not creds or (creds.get("slug") == slug and creds.get("name") == name):
+        return False
+    creds["slug"], creds["name"] = slug, name
+    # The file exists, so O_TRUNC keeps its 0600 mode.
+    fd = os.open(str(path), os.O_WRONLY | os.O_TRUNC)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(creds, fh, indent=2)
+    return True
+
+
 def apply_credentials(creds: dict[str, Any], settings: Any) -> None:
     """Load saved credentials into the live Settings object.
 
@@ -251,7 +277,7 @@ ul { padding-left: 1.2rem; } li { margin: .3rem 0; }
 
 
 def setup_page(
-    public_url: str, state: str, *, webhook_url: str = "", name: str = "CR code review"
+    public_url: str, state: str, *, webhook_url: str = "", name: str = "PullAgent"
 ) -> str:
     """A form that POSTs the manifest to GitHub. One button, no fields."""
     manifest = json.dumps(build_manifest(public_url, webhook_url=webhook_url, name=name))
@@ -310,7 +336,7 @@ already verifying webhook signatures with the new secret &mdash; no restart need
 &rarr;</button></a></p>
 
 <h2>Then</h2>
-<p>Open a pull request. CR reviews it, and re-reviews the delta every time you push.
+<p>Open a pull request. PullAgent reviews it, and re-reviews the delta every time you push.
 Reply to any of its comments and it will answer.</p>
 
 <p class="warn">Keep that credentials file. Re-running setup creates a second App,

@@ -62,8 +62,17 @@ Create a resource group and Basic ACR first, build the dashboard and image,
 then apply `infra/main.bicep` with a local, ignored parameters JSON file. The
 template creates PostgreSQL, Service Bus, Azure Files, the Container Apps, and
 their managed identity. The parameter file must supply the image, database
-password, GitHub App credentials, Foundry key and resource name, and admin
-login. Keep that file out of Git. The Container Apps hold their own secrets.
+password, GitHub App credentials, Foundry key and resource name, admin login,
+and `secretsKey`. Keep that file out of Git. The Container Apps hold their own
+secrets.
+
+`secretsKey` encrypts the API keys customers connect on the dashboard's Models
+page. Generate it once and store it somewhere durable (Key Vault):
+
+    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+Losing or changing it makes every saved customer key unreadable. To rotate,
+set `newkey,oldkey`, have customers' keys re-saved, then drop `oldkey`.
 After the first apply returns the web ingress FQDN, set `publicUrl` to its
 `https://` origin and reapply so GitHub OAuth redirects to the live site.
 
@@ -103,7 +112,45 @@ the webhook URL.
 
 In the App's settings, set the webhook URL to the address from the summary
 (`https://<fqdn>/webhook`) and the callback URL to `https://<fqdn>/auth/callback`.
-The smee relay is no longer involved.
+Under "Post installation", set the **Setup URL** to `https://<fqdn>/app/installed`
+and tick **Redirect on update**, so people land back on the dashboard after
+installing. The smee relay is no longer involved.
+
+Then check the result from any machine with the App's credentials:
+
+```bash
+cr app doctor     # permissions, events, webhook URL, last 24h of deliveries
+```
+
+It exits non-zero on a problem, naming the permission, event or URL to fix.
+
+#### How installs and uninstalls stay in sync
+
+Webhooks are the source of truth. There is no polling; three things cover
+what they can miss:
+
+* **Start-up** compares the installations GitHub lists with ours, adding and
+  removing, so anything that happened while the server was down is caught.
+* **The "not installed" banner** asks GitHub about that one account when it
+  appears, when the tab comes back into view, and on "Check again", so an
+  install shows before its webhook lands. Nothing is asked while the App is
+  installed.
+* **A token request GitHub refuses with 404** marks that installation removed
+  on the spot.
+
+`cr app doctor` lists failed deliveries; redeliver them from the App's
+settings (Advanced > Recent Deliveries) once their cause is fixed.
+
+#### Developing locally
+
+Your laptop has its own database, and GitHub sends the production App's
+webhooks to production, so a local server never hears about installs. The
+banner's check still picks up a new install, and a restart picks up an
+uninstall. To receive
+real webhooks locally, create a second, development App (`/app/setup` on
+your laptop) whose webhook URL is a smee.io channel or a tunnel. Never point
+the production App at a relay: it has one webhook URL, and production would
+stop receiving events.
 
 ### 5. Make yourself an administrator, then decide which installations to approve
 

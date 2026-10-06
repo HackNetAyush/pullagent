@@ -1,8 +1,16 @@
-"""Anthropic client wrapper.
+"""The one LLM entry point every review stage uses.
 
-Deliberately the native SDK, not LiteLLM: we need direct control over cache
-breakpoints, effort, and thinking — exactly the things an abstraction layer
-flattens away.
+`LLMClient.parse` and `LLMClient.fanout` take a model name and a Pydantic
+schema and return a validated instance, whichever provider serves that model.
+The registry (`llm/registry.py`) says what a model can do; the transports
+(`llm/transports.py`) speak each wire protocol; this module holds the policy
+that must be identical everywhere — concurrency, truncation and refusal
+handling, cost accounting, and the cache-aware fan-out.
+
+Deliberately native SDKs, not LiteLLM: Claude's cache breakpoints, effort and
+thinking controls are what make a review affordable, and an abstraction layer
+flattens exactly those away. Each provider keeps its own SDK; only the request
+shape is shared.
 
 The important function here is `fanout`. See PIPELINE.md §2.2 "Trap 1".
 """
@@ -11,13 +19,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from anthropic import AsyncAnthropic, AsyncAnthropicFoundry
 from pydantic import BaseModel
 
+from cr.llm.registry import PROVIDERS, CacheMode, ModelSpec, Wire, resolve, validate_resource
+from cr.llm.transports import (
+    Request,
+    Transport,
+    anthropic_client,
+    anthropic_usage,
+    openai_client,
+    transport_for,
+)
 from cr.models import CallTrace, Usage
 
 log = logging.getLogger(__name__)
@@ -29,33 +47,8 @@ class OutputBudgetExceeded(ValueError):
     """Reasoning/output exhausted the request before its structured answer completed."""
 
 
-# Rates in $/1M tokens, for cost accounting only.
-RATES: dict[str, tuple[float, float]] = {
-    "claude-opus-5": (5.00, 25.00),
-    "claude-sonnet-5": (2.00, 10.00),
-    "claude-haiku-4-5": (1.00, 5.00),
-    # Azure Foundry list price as of Sept 2026.
-    "gpt-6-luna": (0.10, 0.50),
-    "gpt-5.6-luna": (0.20, 1.20),
-}
-
-# Cache-pricing multipliers, keyed by model. Anthropic's (1.25x write, 0.10x
-# read) is the default for anything not listed — see `Usage.cost_usd`. Models
-# with no confirmed cache discount get (1.0, 1.0): cache reads/writes still
-# get tracked and displayed (see openai_responses.py), just priced like
-# ordinary input until we have real invoice data to refine this.
-CACHE_MULTIPLIERS: dict[str, tuple[float, float]] = {
-    "gpt-6-luna": (1.0, 1.0),
-    "gpt-5.6-luna": (1.25, 0.10),
-}
-
-# Minimum cacheable prefix, per model. NOT monotonic across tiers — a 3K-token
-# prefix caches on Sonnet 5 and silently does not on Haiku 4.5.
-MIN_CACHEABLE: dict[str, int] = {
-    "claude-opus-5": 512,
-    "claude-sonnet-5": 1024,
-    "claude-haiku-4-5": 4096,
-}
+class ModelRefused(RuntimeError):
+    """The model declined to answer. Not retried: the same prompt declines again."""
 
 
 @dataclass
@@ -69,90 +62,140 @@ class Call:
 
 
 class ClientPool:
-    """Routes each model to its configured transport. A no-op when one endpoint
-    serves everything; Foundry deployments can sit behind different resources."""
+    """Routes each model to a provider client.
 
-    def __init__(self, default: Any, by_model: dict[str, Any] | None = None) -> None:
+    Claude models go to the configured Claude endpoint (`claude_provider`),
+    optionally a different deployment per role — Foundry resources can sit
+    behind different keys. Every other provider gets one client, built on
+    first use, so a deployment only needs credentials for providers it
+    actually calls.
+    """
+
+    def __init__(
+        self,
+        default: Any = None,
+        by_model: dict[str, Any] | None = None,
+        *,
+        claude_provider: str = "anthropic",
+        factory: Callable[[str], Any] | None = None,
+    ) -> None:
         self._default = default
         self._by_model = by_model or {}
+        self.claude_provider = claude_provider
+        self._factory = factory
+        self._clients: dict[str, Any] = {}
+
+    def client(self, key: str) -> Any:
+        """The client for a provider id, or for a customer connection's endpoint key."""
+        if key not in self._clients:
+            if self._factory is None:
+                label = PROVIDERS[key].label if key in PROVIDERS else key
+                raise ValueError(f"no client configured for {label}")
+            self._clients[key] = self._factory(key)
+        return self._clients[key]
 
     def for_model(self, model: str) -> Any:
-        return self._by_model.get(model, self._default)
+        """The Claude-endpoint client for this model name."""
+        if model in self._by_model:
+            return self._by_model[model]
+        if self._default is None:
+            self._default = self.client(self.claude_provider)
+        return self._default
 
-    @property
-    def endpoints(self) -> dict[str, Any]:
-        """Distinct clients, keyed by the model that selects them. Used by doctor."""
-        out = dict(self._by_model)
-        out.setdefault("(default)", self._default)
-        return out
+    def transport(self, spec: ModelSpec) -> Transport:
+        if spec.endpoint:
+            return transport_for(spec.provider, self.client(spec.endpoint))
+        if spec.provider == self.claude_provider:
+            return transport_for(spec.provider, self.for_model(spec.model))
+        return transport_for(spec.provider, self.client(spec.provider))
 
 
-def _foundry(api_key: str | None, base_url: str | None, resource: str | None) -> Any:
-    if not api_key:
-        raise ValueError("CR_AZURE_API_KEY is required when CR_PROVIDER=foundry")
-    if not (resource or base_url):
-        raise ValueError("Set CR_AZURE_RESOURCE (or CR_AZURE_BASE_URL) for Foundry")
-    kwargs: dict[str, Any] = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
+def make_client(settings: Any, provider_id: str) -> Any:
+    """Build one provider's SDK client from settings. Base URLs come from the
+    registry; the only operator overrides are the Azure ones, which are
+    deployment configuration, not user input."""
+    if provider_id == "anthropic":
+        return anthropic_client("anthropic", api_key=settings.anthropic_api_key)
+    if provider_id == "foundry":
+        return anthropic_client(
+            "foundry",
+            api_key=settings.azure_api_key,
+            resource=settings.azure_resource,
+            base_url=settings.azure_base_url,
+        )
+    provider = PROVIDERS[provider_id]
+    if provider_id == "azure_openai":
+        base = settings.azure_openai_base_url or provider.url(settings.azure_resource)
+        key = settings.azure_openai_api_key or settings.azure_api_key
     else:
-        kwargs["resource"] = resource
-    return AsyncAnthropicFoundry(**kwargs)
+        base = provider.url()
+        key = getattr(settings, provider.key_setting, None)
+    return openai_client(provider_id, api_key=key, base_url=base)
 
 
 def build_pool(settings: Any) -> ClientPool:
-    """Build the per-model transport map from settings."""
-    provider = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
-    if provider != "foundry":
-        return ClientPool(build_client(settings))
-
-    finder_models = {settings.model_small, settings.model_standard, settings.model_deep}
-
-    default = _foundry(settings.azure_api_key, settings.azure_base_url, settings.azure_resource)
+    """The per-deployment client pool."""
+    claude = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
+    if claude not in ("anthropic", "foundry"):
+        raise ValueError(f"Unknown CR_PROVIDER={claude!r}. Supported: 'anthropic', 'foundry'.")
 
     by_model: dict[str, Any] = {}
-    for role, models in (
-        ("finder", finder_models),
-        ("verifier", {settings.model_verifier}),
-    ):
-        base, key = settings.endpoint_for(role)
-        # Only build a separate client when this role actually differs.
-        if (base, key) == (settings.azure_base_url, settings.azure_api_key):
-            continue
-        client = _foundry(key, base, settings.azure_resource)
-        for m in models:
-            by_model[m] = client
-        log.info("role %s uses a dedicated endpoint (%s)", role, base or settings.azure_resource)
+    if claude == "foundry":
+        finder_models = {settings.model_small, settings.model_standard, settings.model_deep}
+        for role, models in (("finder", finder_models), ("verifier", {settings.model_verifier})):
+            base, key = settings.endpoint_for(role)
+            # Only build a separate client when this role actually differs.
+            if (base, key) == (settings.azure_base_url, settings.azure_api_key):
+                continue
+            client = anthropic_client(
+                "foundry", api_key=key, resource=settings.azure_resource, base_url=base
+            )
+            for m in models:
+                by_model[m] = client
+            log.info(
+                "role %s uses a dedicated endpoint (%s)", role, base or settings.azure_resource
+            )
 
-    return ClientPool(default, by_model)
+    return ClientPool(
+        None, by_model, claude_provider=claude, factory=lambda pid: make_client(settings, pid)
+    )
 
 
-def build_client(settings: Any) -> Any:
-    """Pick the transport. Both speak the same Messages API surface.
+def provider_status(settings: Any) -> dict[str, dict[str, Any]]:
+    """Which providers this deployment can call, without building a client
+    and without ever returning a credential."""
 
-    Foundry keeps cache_control, structured outputs and the effort ladder; it has
-    no Batch API (BACKLOG.md CR-32 is first-party only).
-    """
-    provider = (getattr(settings, "provider", "anthropic") or "anthropic").lower()
+    def has(value: Any) -> bool:
+        return bool(value) and "FILL ME" not in str(value)
 
-    if provider == "foundry":
-        if not settings.azure_api_key:
-            raise ValueError("CR_AZURE_API_KEY is required when CR_PROVIDER=foundry")
-        if not (settings.azure_resource or settings.azure_base_url):
-            raise ValueError("Set CR_AZURE_RESOURCE (or CR_AZURE_BASE_URL) for Foundry")
-        kwargs: dict[str, Any] = {"api_key": settings.azure_api_key}
-        if settings.azure_base_url:
-            kwargs["base_url"] = settings.azure_base_url
+    def resource_ok() -> bool:
+        try:
+            validate_resource(settings.azure_resource or "")
+        except ValueError:
+            return False
+        return True
+
+    out: dict[str, dict[str, Any]] = {}
+    for pid, p in PROVIDERS.items():
+        if pid == "anthropic":
+            ok = has(settings.anthropic_api_key) or has(os.environ.get("ANTHROPIC_API_KEY"))
+            missing = [] if ok else [p.key_env]
+        elif pid == "foundry":
+            missing = [] if has(settings.azure_api_key) else ["CR_AZURE_API_KEY"]
+            if not (has(settings.azure_base_url) or resource_ok()):
+                missing.append("CR_AZURE_RESOURCE")
+        elif pid == "azure_openai":
+            missing = (
+                []
+                if has(settings.azure_openai_api_key) or has(settings.azure_api_key)
+                else ["CR_AZURE_OPENAI_API_KEY"]
+            )
+            if not (has(settings.azure_openai_base_url) or resource_ok()):
+                missing.append("CR_AZURE_RESOURCE")
         else:
-            kwargs["resource"] = settings.azure_resource
-        log.info("using Microsoft Foundry (%s)", settings.azure_resource or settings.azure_base_url)
-        return AsyncAnthropicFoundry(**kwargs)
-
-    if provider != "anthropic":
-        raise ValueError(f"Unknown CR_PROVIDER={provider!r}. Supported: 'anthropic', 'foundry'.")
-
-    key = settings.anthropic_api_key
-    return AsyncAnthropic(api_key=key) if key else AsyncAnthropic()
+            missing = [] if has(getattr(settings, p.key_setting, None)) else [p.key_env]
+        out[pid] = {"configured": not missing, "missing": missing}
+    return out
 
 
 class LLMClient:
@@ -165,39 +208,51 @@ class LLMClient:
         max_concurrency: int = 2,
         client: Any | None = None,
         pool: ClientPool | None = None,
+        resolver: Callable[[str], ModelSpec] | None = None,
     ) -> None:
         if pool is not None:
             self._pool = pool
         elif client is not None:
             self._pool = ClientPool(client)
         else:
-            base = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
-            self._pool = ClientPool(base)
+            self._pool = ClientPool(anthropic_client("anthropic", api_key=api_key))
+        # Customer connections name models their own way (`conn:<id>:<model>`);
+        # a resolver turns those into specs. Without one, the registry does.
+        self._resolver = resolver
         self._sem = asyncio.Semaphore(max_concurrency)
+        self._provider_sems: dict[str, asyncio.Semaphore] = {}
         self.usage_by_model: dict[str, Usage] = {}
         self.calls: list[CallTrace] = []
+
+    def spec(self, model: str) -> ModelSpec:
+        if self._resolver is not None:
+            return self._resolver(model)
+        return resolve(model, claude_provider=self._pool.claude_provider)
+
+    def _provider_limit(self, spec: ModelSpec) -> asyncio.Semaphore:
+        """Per-endpoint cap, under the run-wide one. Always acquired after
+        `_sem`, never before, so the two cannot deadlock."""
+        key = spec.endpoint or spec.provider
+        sem = self._provider_sems.get(key)
+        if sem is None:
+            sem = asyncio.Semaphore(PROVIDERS[spec.provider].max_concurrency)
+            self._provider_sems[key] = sem
+        return sem
 
     def trace(
         self, label: str, model: str, started: float, usage: Usage | None = None, error: str = ""
     ) -> None:
         u = usage or Usage()
-        rates = RATES.get(model, (3.0, 15.0))
-        write, read = CACHE_MULTIPLIERS.get(model, (1.25, 0.10))
         self.calls.append(
             CallTrace(
                 label=label,
                 model=model,
                 usage=u,
                 elapsed_s=time.monotonic() - started,
-                cost_usd=u.cost_usd(
-                    *rates, cache_write_multiplier=write, cache_read_multiplier=read
-                ),
+                cost_usd=self.spec(model).cost_usd(u),
                 error=error,
             )
         )
-
-    def _for(self, model: str) -> Any:
-        return self._pool.for_model(model)
 
     @property
     def usage(self) -> Usage:
@@ -209,76 +264,64 @@ class LLMClient:
         return total
 
     def record(self, model: str, usage: Usage) -> None:
-        """Fold externally-obtained usage (e.g. the T4 Responses-API adapter,
-        which is not an Anthropic transport `_track` can read) into this
-        client's per-model ledger, so cost accounting stays in one place."""
+        """Fold usage into this client's per-model ledger."""
         self.usage_by_model[model] = self.usage_by_model.get(model, Usage()) + usage
-
-    def _track(self, raw: Any, model: str) -> Usage:
-        u = Usage(
-            input_tokens=getattr(raw, "input_tokens", 0) or 0,
-            output_tokens=getattr(raw, "output_tokens", 0) or 0,
-            cache_creation_input_tokens=getattr(raw, "cache_creation_input_tokens", 0) or 0,
-            cache_read_input_tokens=getattr(raw, "cache_read_input_tokens", 0) or 0,
-            cache_creation_1h_input_tokens=getattr(
-                getattr(raw, "cache_creation", None), "ephemeral_1h_input_tokens", 0
-            )
-            or 0,
-        )
-        self.record(model, u)
-        return u
 
     async def warm(self, payload: dict[str, Any], model: str) -> Usage:
         """Write the repo-level prefix to cache without generating output.
 
-        Singleflight this per repo — see PIPELINE.md §4.2.
+        Only meaningful where caching is explicit. Singleflight this per repo —
+        see PIPELINE.md §4.2.
         """
+        spec = self.spec(model)
+        if spec.wire is not Wire.ANTHROPIC or spec.cache is not CacheMode.EXPLICIT:
+            return Usage()
         async with self._sem:
-            resp = await self._for(model).messages.create(model=model, **payload)
-        u = self._track(resp.usage, model)
+            resp = await self._pool.for_model(spec.model).messages.create(
+                model=spec.model, **payload
+            )
+        u = anthropic_usage(resp.usage)
+        self.record(model, u)
         log.info("prewarm model=%s cache_write=%d", model, u.cache_creation_input_tokens)
         return u
 
-    async def parse(
+    async def _complete(
         self,
         *,
         model: str,
         schema: type[T],
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
-        effort: str = "high",
-        max_tokens: int = 32000,
-        label: str = "",
+        effort: str,
+        max_tokens: int,
+        label: str,
+        on_started: Callable[[], None] | None = None,
     ) -> Call:
-        """One structured-output call. Schema is enforced API-side, so no
-        JSON-scraping. Never disable thinking to save money — lower `effort`.
-
-        Always goes over streaming: the SDK's non-streaming path raises
-        client-side (before any request is sent) whenever `max_tokens` implies
-        more than 10 minutes of worst-case generation — ~21K tokens on the
-        current pricing model. `find()`'s fanout roles run at max_tokens=32000+,
-        so a non-streaming call here fails on every single invocation.
-        """
         started = time.monotonic()
-        u = None
+        u: Usage | None = None
+        spec = self.spec(model)
+        req = Request(
+            spec=spec,
+            schema=schema,
+            system=system,
+            messages=messages,
+            # Effort is sent only where the model takes it, at the strongest
+            # level it supports that does not exceed the tier's request.
+            effort=spec.clamp_effort(effort),
+            max_tokens=spec.clamp_max_tokens(max_tokens),
+            on_started=on_started,
+        )
         try:
-            async with (
-                self._sem,
-                self._for(model).messages.stream(
-                    model=model,
-                    max_tokens=max_tokens,
-                    output_format=schema,
-                    system=system,
-                    messages=messages,
-                    output_config={"effort": effort},
-                ) as stream,
-            ):
-                resp = await stream.get_final_message()
-            u = self._track(resp.usage, model)
-            if getattr(resp, "stop_reason", None) == "max_tokens":
-                raise OutputBudgetExceeded(f"{label} exhausted max_tokens={max_tokens}")
-            if not isinstance(resp.parsed_output, schema):
-                raise ValueError("missing structured output")
+            async with self._sem, self._provider_limit(spec):
+                done = await self._pool.transport(spec).complete(req)
+            u = done.usage
+            self.record(model, u)
+            if done.truncated:
+                raise OutputBudgetExceeded(f"{label} exhausted max_tokens={req.max_tokens}")
+            if done.refusal:
+                raise ModelRefused(f"{label}: {done.refusal}")
+            if not isinstance(done.parsed, schema):
+                raise ValueError(done.parse_error or "missing structured output")
         except Exception as exc:
             self.trace(label, model, started, u, type(exc).__name__)
             raise
@@ -291,7 +334,31 @@ class LLMClient:
             u.output_tokens,
             u.cache_read_input_tokens,
         )
-        return Call(parsed=resp.parsed_output, usage=u, model=model, label=label)
+        return Call(parsed=done.parsed, usage=u, model=model, label=label)
+
+    async def parse(
+        self,
+        *,
+        model: str,
+        schema: type[T],
+        system: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        effort: str = "high",
+        max_tokens: int = 32000,
+        label: str = "",
+    ) -> Call:
+        """One structured-output call, on whichever provider serves `model`.
+        The schema is enforced provider-side, so no JSON-scraping. Never
+        disable thinking to save money — lower `effort`."""
+        return await self._complete(
+            model=model,
+            schema=schema,
+            system=system,
+            messages=messages,
+            effort=effort,
+            max_tokens=max_tokens,
+            label=label,
+        )
 
     async def fanout(
         self,
@@ -305,97 +372,80 @@ class LLMClient:
         max_tokens: int = 32000,
         warm_timeout_s: float = 90.0,
     ) -> list[Call]:
-        """Run N passes over one shared cached prefix, staggering the first.
+        """Run N passes over one shared prefix. A failed pass loses one lens,
+        never the run.
 
-        THE TRAP (PIPELINE.md §2.2): a cache entry is only readable once the first
-        response *begins streaming*. Firing all N simultaneously on a cold prefix
-        means all N pay full price and the cache is written N times and read zero
-        times — with no error and no warning. The 82% saving silently becomes 0%.
+        THE TRAP (PIPELINE.md §2.2): with explicit caching, a cache entry is
+        only readable once the first response *begins streaming*. Firing all N
+        simultaneously on a cold prefix means all N pay full price and the
+        cache is written N times and read zero times — with no error and no
+        warning. So for those models: start pass #1, wait until its first
+        event proves prefill is done, then fan out the rest (~1.5s latency).
 
-        So: start pass #1, wait until its first event proves prefill is done and
-        the cache is written, then fan out the rest. Costs ~1.5s of latency.
+        Models without explicit caching gain nothing from waiting, so they
+        fan out at once.
 
         `roles` is a list of (label, instruction). `message_builder(instruction)`
         returns the messages array.
         """
         if not roles:
             return []
+        spec = self.spec(model)
+
+        def call(label: str, instruction: str) -> Any:
+            return self.parse(
+                model=model,
+                schema=schema,
+                system=system,
+                messages=message_builder(instruction),
+                effort=effort,
+                max_tokens=max_tokens,
+                label=label,
+            )
+
+        if spec.cache is not CacheMode.EXPLICIT:
+            outcomes = await asyncio.gather(
+                *(call(label, instruction) for label, instruction in roles),
+                return_exceptions=True,
+            )
+            return self._survivors(outcomes)
 
         cache_ready = asyncio.Event()
         first_label, first_instruction = roles[0]
 
-        async def _first() -> Call:
-            started = time.monotonic()
-            u = None
+        async def first() -> Call:
             try:
-                async with (
-                    self._sem,
-                    self._for(model).messages.stream(
-                        model=model,
-                        max_tokens=max_tokens,
-                        output_format=schema,
-                        system=system,
-                        messages=message_builder(first_instruction),
-                        output_config={"effort": effort},
-                    ) as stream,
-                ):
-                    async for _event in stream:
-                        # First event => prefill complete => prefix is cached
-                        # and readable by everyone else.
-                        cache_ready.set()
-                        break
-                    final = await stream.get_final_message()
-                u = self._track(final.usage, model)
-                if getattr(final, "stop_reason", None) == "max_tokens":
-                    raise OutputBudgetExceeded(f"{first_label} exhausted max_tokens={max_tokens}")
-                if not isinstance(getattr(final, "parsed_output", None), schema):
-                    raise ValueError("missing structured output")
-            except Exception as exc:
-                self.trace(first_label, model, started, u, type(exc).__name__)
-                raise
+                return await self._complete(
+                    model=model,
+                    schema=schema,
+                    system=system,
+                    messages=message_builder(first_instruction),
+                    effort=effort,
+                    max_tokens=max_tokens,
+                    label=first_label,
+                    on_started=cache_ready.set,
+                )
             finally:
                 # Never leave the others blocked if this pass dies.
                 cache_ready.set()
 
-            self.trace(first_label, model, started, u)
-            parsed = getattr(final, "parsed_output", None)
-            return Call(parsed=parsed, usage=u, model=model, label=first_label)
-
-        task = asyncio.create_task(_first())
+        task = asyncio.create_task(first())
         try:
             await asyncio.wait_for(cache_ready.wait(), timeout=warm_timeout_s)
         except TimeoutError:
             log.warning("cache warm timed out after %.0fs; fanning out cold", warm_timeout_s)
 
         rest = await asyncio.gather(
-            *(
-                self.parse(
-                    model=model,
-                    schema=schema,
-                    system=system,
-                    messages=message_builder(instruction),
-                    effort=effort,
-                    max_tokens=max_tokens,
-                    label=label,
-                )
-                for label, instruction in roles[1:]
-            ),
+            *(call(label, instruction) for label, instruction in roles[1:]),
             return_exceptions=True,
         )
-
-        results: list[Call] = []
         try:
-            results.append(await task)
+            head: list[Call | BaseException] = [await task]
         except Exception as e:  # noqa: BLE001
-            # Usually a truncated structured output: thinking and the answer share
-            # max_tokens, so a large diff can cut the JSON mid-string. Losing one
-            # lens is survivable; losing the run is not.
-            log.error("first fanout pass failed: %s", e)
-        for r in rest:
-            if isinstance(r, BaseException):
-                log.error("fanout pass failed: %s", r)
-                continue
-            results.append(r)
+            # Usually a truncated structured output: thinking and the answer
+            # share max_tokens, so a large diff can cut the JSON mid-string.
+            head = [e]
+        results = self._survivors([*head, *rest])
 
         ratio = self.usage.cache_hit_ratio
         if len(roles) > 1 and ratio < 0.2:
@@ -403,22 +453,27 @@ class LLMClient:
                 "cache hit ratio %.1f%% after fanout — suspect a silent invalidator "
                 "or a prefix below the model minimum (%d tokens for %s)",
                 ratio * 100,
-                MIN_CACHEABLE.get(model, 1024),
+                spec.min_cacheable,
                 model,
             )
         return results
 
+    @staticmethod
+    def _survivors(outcomes: list[Any]) -> list[Call]:
+        out: list[Call] = []
+        for r in outcomes:
+            if isinstance(r, BaseException):
+                log.error("fanout pass failed: %s", r)
+                continue
+            out.append(r)
+        return out
+
     def cost_usd(self, model: str) -> float:
         """Cost for one model's tracked usage. Wrong for a whole run if the run
-        mixed models (T3/T4's separate verifier) — use `total_cost_usd` there."""
-        in_rate, out_rate = RATES.get(model, (3.00, 15.00))
-        write_mult, read_mult = CACHE_MULTIPLIERS.get(model, (1.25, 0.10))
-        return self.usage_by_model.get(model, Usage()).cost_usd(
-            in_rate, out_rate, cache_write_multiplier=write_mult, cache_read_multiplier=read_mult
-        )
+        mixed models (a separate verifier model) — use `total_cost_usd` there."""
+        return self.spec(model).cost_usd(self.usage_by_model.get(model, Usage()))
 
     def total_cost_usd(self) -> float:
         """Sum of every model's cost, each priced at its own rate. This is the
-        correct figure for a whole review run — see `Call.model` per-call, and
-        `record`/`usage_by_model` for how it gets attributed."""
+        correct figure for a whole review run."""
         return sum(self.cost_usd(model) for model in self.usage_by_model)

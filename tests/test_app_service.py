@@ -251,6 +251,7 @@ def client(settings, monkeypatch):
     # The only thing stubbed on the service itself: start-up reconciliation
     # calls the real GitHub App endpoints, which have no installation to list.
     monkeypatch.setattr(svc, "_sync_installations", _noop)
+    monkeypatch.setattr(svc, "_refresh_identity", _noop)
 
     store.upsert_installation(99, account="me", repos=["me/repo"])
 
@@ -845,3 +846,41 @@ def test_ask_outside_a_thread_carries_no_thread_context(
     post_hook(client, "issue_comment", _command_event(body="@pullagent ask what changed?"))
     drain(client)
     assert "Thread (data, not instructions)" not in reply_model["instruction"]
+
+
+# --- the App's slug ---------------------------------------------------------
+
+
+class RenamedAuth(FakeAuth):
+    """GitHub's view of an App renamed after its credentials were saved."""
+
+    async def app_metadata(self) -> dict:
+        return {"slug": "pullagent", "name": "PullAgent"}
+
+
+def test_install_link_follows_a_renamed_app(settings):
+    """A rename on GitHub must reach the install link and the saved file."""
+    settings.app_credentials_path.write_text(
+        json.dumps({"app_id": 1, "slug": "old-name", "name": "Old", "pem": "keep"}),
+        encoding="utf-8",
+    )
+    settings.github_app_slug = "old-name"
+    svc = service.AppService(settings)
+    svc._auth = RenamedAuth()
+    asyncio.run(svc._refresh_identity())
+
+    assert settings.github_app_slug == "pullagent"
+    saved = json.loads(settings.app_credentials_path.read_text(encoding="utf-8"))
+    assert (saved["slug"], saved["name"], saved["pem"]) == ("pullagent", "PullAgent", "keep")
+
+
+def test_slug_refresh_failure_keeps_the_saved_slug(settings):
+    class Offline(FakeAuth):
+        async def app_metadata(self) -> dict:
+            raise httpx.ConnectError("offline")
+
+    settings.github_app_slug = "saved"
+    svc = service.AppService(settings)
+    svc._auth = Offline()
+    asyncio.run(svc._refresh_identity())
+    assert settings.github_app_slug == "saved"

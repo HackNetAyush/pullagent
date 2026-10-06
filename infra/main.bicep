@@ -39,6 +39,9 @@ param githubAppPrivateKey string
 @description('GitHub App id.')
 param githubAppId string
 
+@description('GitHub App slug, as in github.com/apps/<slug>. Builds the "Install on GitHub" links.')
+param githubAppSlug string = 'pullagent'
+
 @secure()
 @description('Webhook secret. Without it every delivery is rejected.')
 param githubWebhookSecret string
@@ -55,6 +58,10 @@ param azureApiKey string
 
 @description('Foundry resource name hosting the Claude deployments.')
 param azureResource string
+
+@secure()
+@description('Fernet key that encrypts the API keys customers connect in the dashboard. Generate once and never lose it: without it every saved customer key is unreadable. Comma-separate several to rotate (the first encrypts, all decrypt).')
+param secretsKey string
 
 @description('Comma-separated GitHub logins seeded as administrators.')
 param adminLogins string
@@ -258,6 +265,7 @@ var sharedEnv = [
   { name: 'CR_APP_REQUIRE_APPROVAL', value: 'true' }
   { name: 'CR_APP_ALLOW_SETUP', value: 'false' }
   { name: 'CR_GITHUB_APP_ID', value: githubAppId }
+  { name: 'CR_GITHUB_APP_SLUG', value: githubAppSlug }
   { name: 'CR_GITHUB_CLIENT_ID', value: githubClientId }
   { name: 'CR_ADMIN_LOGINS', value: adminLogins }
   { name: 'CR_DB_URL', secretRef: 'db-url' }
@@ -266,6 +274,9 @@ var sharedEnv = [
   { name: 'CR_GITHUB_APP_PRIVATE_KEY', secretRef: 'gh-private-key' }
   { name: 'CR_GITHUB_WEBHOOK_SECRET', secretRef: 'gh-webhook-secret' }
   { name: 'CR_GITHUB_CLIENT_SECRET', secretRef: 'gh-client-secret' }
+  // Web encrypts a customer key when it is saved; the worker decrypts it to
+  // run a review. Both revisions must hold the same value.
+  { name: 'CR_SECRETS_KEY', secretRef: 'secrets-key' }
 ]
 
 var sharedSecrets = [
@@ -275,6 +286,7 @@ var sharedSecrets = [
   { name: 'gh-private-key', value: githubAppPrivateKey }
   { name: 'gh-webhook-secret', value: githubWebhookSecret }
   { name: 'gh-client-secret', value: githubClientSecret }
+  { name: 'secrets-key', value: secretsKey }
 ]
 
 var cacheVolume = [

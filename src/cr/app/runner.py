@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cr import vault
+from cr.app import workspace
 from cr.app.api import InstallationClient
 from cr.app.auth import AppAuth
 from cr.config import TIERS, Settings
@@ -79,6 +81,17 @@ class LocalContext:
 
     graph_slice: str = ""
     lint: LintResult = field(default_factory=LintResult)
+
+
+def _public(text: str, settings: Settings, account: str) -> str:
+    """An error as it may appear on the pull request's check, the run and the
+    job: anyone who can see the PR reads it, and a provider's error can echo
+    the key it rejected. Scrubbed of every key the review could have used."""
+    try:
+        secrets = workspace.secrets_for(settings, account)
+    except Exception:  # noqa: BLE001 - key-shaped text is still scrubbed below
+        secrets = []
+    return vault.scrub(text, secrets)[:500]
 
 
 async def run_review_job(
@@ -180,6 +193,30 @@ async def run_review_job(
 
             check_id = await gh.create_check_run(head_sha)
 
+            # A repository the account routed to one of its own tiers runs every
+            # pull request on that tier and the account's own keys, whatever its
+            # size. One that cannot run says so on the check rather than quietly
+            # spending CR's credits on a repository routed away from them.
+            llm = None
+            try:
+                custom = workspace.resolve_repo(s, owner, repo)
+            except workspace.TierUnavailable as e:
+                outcome.error = _public(str(e), s, owner)
+                await _finish_check(
+                    gh,
+                    check_id,
+                    conclusion="neutral",
+                    title="Custom tier unavailable",
+                    summary=(
+                        f"{e}.\n\nFix it under **Models** in the PullAgent dashboard, or route "
+                        f"{repo} back to PullAgent's managed review."
+                    ),
+                )
+                return outcome
+            if custom is not None:
+                cfg, llm = custom
+                outcome.tier = cfg.label or cfg.name
+
             reviewable = {f.path for f in decision.reviewable}
             local = await asyncio.to_thread(
                 _gather_local_context,
@@ -205,9 +242,12 @@ async def run_review_job(
                 run_id = rid
 
             result = await run_review(
-                repo=RepoContext(slug=repo),
+                # The owner's guidelines sit in the cached system prefix, so
+                # every review of this repository reads them at cache prices.
+                repo=RepoContext(slug=repo, guidelines=store.repo_guidelines(repo)),
                 pr=pr_ctx,
                 tier=cfg,
+                client=llm,
                 source="app",
                 pr_number=number,
                 head_sha=head_sha,
@@ -220,21 +260,29 @@ async def run_review_job(
             if result.errors:
                 # An incomplete review is worse than no review: the author
                 # reads silence on a file as "checked, nothing found".
-                outcome.error = "; ".join(result.errors)[:500]
+                outcome.error = _public("; ".join(result.errors), s, owner)
                 await _finish_check(
                     gh,
                     check_id,
                     conclusion="neutral",
                     title="Review incomplete",
                     summary=(
-                        "CR could not finish this review, so nothing was posted.\n\n"
+                        "PullAgent could not finish this review, so nothing was posted.\n\n"
                         f"```\n{outcome.error}\n```"
                     ),
                 )
                 return outcome
 
             posted = await _post(
-                gh, result, full, review_set, head_sha, incremental, since, payload.get("row_id")
+                gh,
+                result,
+                full,
+                review_set,
+                head_sha,
+                incremental,
+                since,
+                payload.get("row_id"),
+                attribution=workspace.attribution(owner, cfg) if cfg.custom else "",
             )
             outcome.posted = posted
 
@@ -269,7 +317,7 @@ async def run_review_job(
             raise
         except Exception as exc:  # noqa: BLE001 - one bad PR must not kill the worker
             log.exception("review of %s#%s failed", repo, number)
-            outcome.error = f"{type(exc).__name__}: {exc}"[:500]
+            outcome.error = _public(f"{type(exc).__name__}: {exc}", s, owner)
             store.close_run(run_id, status="failed", error=outcome.error)
             await _finish_check(
                 gh,
@@ -413,6 +461,7 @@ async def _post(
     incremental: bool,
     since: str,
     row_id: int | None = None,
+    attribution: str = "",
 ) -> int:
     """Submit the review. Shielded: a supersede here would half-post.
 
@@ -440,6 +489,7 @@ async def _post(
         cost=result.cost_usd,
         elapsed=result.elapsed_s,
         killed=len(result.suppressed),
+        attribution=attribution,
     )
     if incremental and since:
         body = body.replace(

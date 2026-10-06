@@ -16,12 +16,17 @@ from cr.store.models import (
     SCHEMA_VERSION,
     Account,
     Base,
+    CustomTier,
     Delivery,
     FindingRow,
     Installation,
     Job,
+    KeyTest,
     Meta,
+    ProviderConnection,
     PRState,
+    RepoSettings,
+    RoutingRules,
     Run,
     Suppression,
     User,
@@ -72,23 +77,53 @@ def init(url: str | None = None) -> sessionmaker[Session]:
         # fails on a dead socket instead of reconnecting.
         kwargs |= {"pool_pre_ping": True, "pool_recycle": 1800, "pool_size": 5, "max_overflow": 5}
 
-    _ENGINE = create_engine(url, **kwargs)
-    Base.metadata.create_all(_ENGINE)
-    _add_missing_columns(_ENGINE)
-    _SESSION = sessionmaker(bind=_ENGINE, future=True)
-
-    with _SESSION() as s:
-        row = s.get(Meta, "schema_version")
-        if row is None:
-            s.add(Meta(key="schema_version", value=str(SCHEMA_VERSION)))
-            s.commit()
-        elif row.value != str(SCHEMA_VERSION):
-            # _add_missing_columns has already run, so the database now matches.
-            # Stamp it, or every future start-up warns about a resolved gap.
-            log.info("store migrated v%s -> v%s", row.value, SCHEMA_VERSION)
-            row.value = str(SCHEMA_VERSION)
-            s.commit()
+    engine = create_engine(url, **kwargs)
+    factory = sessionmaker(bind=engine, future=True)
+    with _schema_lock(engine):
+        Base.metadata.create_all(engine)
+        _add_missing_columns(engine)
+        with factory() as s:
+            row = s.get(Meta, "schema_version")
+            if row is None:
+                s.add(Meta(key="schema_version", value=str(SCHEMA_VERSION)))
+                s.commit()
+            elif row.value != str(SCHEMA_VERSION):
+                # _add_missing_columns has already run, so the database now matches.
+                # Stamp it, or every future start-up warns about a resolved gap.
+                log.info("store migrated v%s -> v%s", row.value, SCHEMA_VERSION)
+                row.value = str(SCHEMA_VERSION)
+                s.commit()
+    # Published only once the schema is in place: a failed start-up leaves
+    # nothing half-initialised for the next call to trust.
+    _ENGINE, _SESSION = engine, factory
     return _SESSION
+
+
+# Any fixed number, the same in every process: the key of the advisory lock
+# that serialises schema changes.
+_SCHEMA_LOCK = 0x70756C6C  # "pull"
+
+
+@contextmanager
+def _schema_lock(engine) -> Iterator[None]:
+    """One process at a time through schema creation and migration.
+
+    The web and worker apps start together after a deploy and both run it; on
+    Postgres, two concurrent CREATE TABLEs for the same new table fail the
+    second. A session-level advisory lock makes the second wait, then find the
+    tables there. SQLite serialises writers by itself.
+    """
+    if engine.dialect.name != "postgresql":
+        yield
+        return
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _SCHEMA_LOCK})
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _SCHEMA_LOCK})
 
 
 def _add_missing_columns(engine) -> None:
@@ -97,22 +132,67 @@ def _add_missing_columns(engine) -> None:
     from sqlalchemy import inspect, text
 
     insp = inspect(engine)
-    if "runs" not in insp.get_table_names():
-        return
-    have = {c["name"] for c in insp.get_columns("runs")}
-    wanted = {
-        "source": "VARCHAR(16) DEFAULT 'pr'",
-        "actor": "VARCHAR(128) DEFAULT ''",
-        "verified_count": "INTEGER DEFAULT 0",
-        "cache_hit": "BOOLEAN DEFAULT 0",
-        "cached_cost_usd": "FLOAT DEFAULT 0.0",
-        "judge_cost_usd": "FLOAT DEFAULT 0.0",
+    tables = set(insp.get_table_names())
+    wanted: dict[str, dict[str, str]] = {
+        "runs": {
+            "source": "VARCHAR(16) DEFAULT 'pr'",
+            "actor": "VARCHAR(128) DEFAULT ''",
+            "verified_count": "INTEGER DEFAULT 0",
+            "cache_hit": "BOOLEAN DEFAULT FALSE",
+            "cached_cost_usd": "FLOAT DEFAULT 0.0",
+            "judge_cost_usd": "FLOAT DEFAULT 0.0",
+            "billing": "VARCHAR(16) DEFAULT 'managed'",
+            "account": "VARCHAR(255) DEFAULT ''",
+            "model_costs": "JSON DEFAULT '[]'",
+        },
+        # JSON is TEXT on SQLite and JSON on Postgres; both accept '[]'.
+        "users": {"orgs": "JSON DEFAULT '[]'", "admin_orgs": "JSON DEFAULT '[]'"},
     }
+    # Columns whose VARCHAR length grew. SQLite ignores lengths; Postgres
+    # enforces them, and widening one there is a catalogue change, not a rewrite.
+    widened = {("runs", "model"): 255}
+    postgres = engine.dialect.name == "postgresql"
+    # The web and worker apps start together and both run this; on Postgres the
+    # one that loses the race must find the column there, not fail on it.
+    add = "ADD COLUMN IF NOT EXISTS" if postgres else "ADD COLUMN"
     with engine.begin() as conn:
-        for name, ddl in wanted.items():
-            if name not in have:
-                conn.execute(text(f"ALTER TABLE runs ADD COLUMN {name} {ddl}"))
-                log.info("store: added runs.%s", name)
+        for table, columns in wanted.items():
+            if table not in tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in columns.items():
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} {add} {name} {ddl}"))
+                    log.info("store: added %s.%s", table, name)
+        if postgres:
+            for (table, name), size in widened.items():
+                if table not in tables:
+                    continue
+                col = next((c for c in insp.get_columns(table) if c["name"] == name), None)
+                length = getattr(col["type"], "length", None) if col else None
+                if length is not None and length < size:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} ALTER COLUMN {name} TYPE VARCHAR({size})")
+                    )
+                    log.info("store: widened %s.%s to %d", table, name, size)
+        # Runs from before workspaces existed belong to their repository's
+        # owner. One statement: a row-by-row loop would hold the table's lock
+        # for as long as there are runs.
+        if "runs" in tables:
+            owner = (
+                "split_part(repo, '/', 1)"
+                if postgres
+                else "CASE WHEN instr(repo, '/') > 0 "
+                "THEN substr(repo, 1, instr(repo, '/') - 1) ELSE repo END"
+            )
+            done = conn.execute(
+                text(
+                    f"UPDATE runs SET account = {owner} "
+                    "WHERE (account IS NULL OR account = '') AND repo IS NOT NULL"
+                )
+            ).rowcount
+            if done:
+                log.info("store: assigned %d runs to their workspace", done)
 
 
 def reset_for_tests() -> None:
@@ -219,6 +299,7 @@ def record_run(
             u = result.usage
             run = Run(
                 repo=repo,
+                account=repo.split("/", 1)[0],
                 pr_number=pr_number,
                 head_sha=head_sha,
                 tier=result.tier,
@@ -314,6 +395,7 @@ def start_run(
     head_sha: str = "",
     source: str = "pr",
     actor: str = "",
+    billing: str = "managed",
     url: str | None = None,
 ) -> int | None:
     """Create the row a dashboard watches while the review is in flight."""
@@ -327,6 +409,8 @@ def start_run(
                 model=model,
                 source=source,
                 actor=actor,
+                billing=billing,
+                account=repo.split("/", 1)[0],
                 status="running",
                 stage="triage",
                 stage_index=0,
@@ -424,6 +508,7 @@ def finish_run(
             run.elapsed_s = result.elapsed_s
             run.cache_hit = result.cache_hit
             run.cached_cost_usd = result.cached_cost_usd
+            run.model_costs = [mc.model_dump() for mc in result.model_costs]
             for vf, posted in [(v, 1) for v in result.posted] + [(v, 0) for v in result.suppressed]:
                 s.add(_row(run.id, run.repo, vf, posted))
     except Exception as e:  # noqa: BLE001
@@ -520,6 +605,21 @@ def upsert_installation(
                 row.removed = removed
     except Exception as e:  # noqa: BLE001
         log.warning("upsert_installation failed: %s", e)
+
+
+def remove_account_installations(account: str, url: str | None = None) -> list[int]:
+    """Mark every installation on `account` removed; the ids that changed."""
+    with session(url) as s:
+        rows = s.execute(
+            select(Installation).where(
+                func.lower(Installation.account) == account.lower(), ~Installation.removed
+            )
+        ).scalars()
+        gone = []
+        for row in rows:
+            row.removed = True
+            gone.append(row.id)
+        return gone
 
 
 def drop_installation_repos(installation_id: int, repos: list[str], url: str | None = None) -> None:
@@ -770,6 +870,7 @@ def jobs_page(
     kind: str | None = None,
     status: str | None = None,
     repo: str | None = None,
+    account: str | None = None,
     url: str | None = None,
 ) -> tuple[list[Job], int]:
     """One page of jobs plus the total, so the queue view can page honestly."""
@@ -782,6 +883,8 @@ def jobs_page(
             where.append(Job.status == status)
         if repo:
             where.append(Job.repo == repo)
+        if account:
+            where.append(func.lower(Job.repo).like(account.lower() + "/%"))
         total = s.execute(select(func.count(Job.id)).where(*where)).scalar_one()
         rows = list(
             s.execute(
@@ -886,6 +989,8 @@ def upsert_user(
     avatar_url: str = "",
     email: str = "",
     is_admin: bool | None = None,
+    orgs: list[str] | None = None,
+    admin_orgs: list[str] | None = None,
     url: str | None = None,
 ) -> User:
     with session(url) as s:
@@ -897,6 +1002,10 @@ def upsert_user(
         row.last_seen_at = _utcnow()
         if is_admin is not None:
             row.is_admin = is_admin
+        if orgs is not None:
+            row.orgs = sorted(set(orgs))
+        if admin_orgs is not None:
+            row.admin_orgs = sorted(set(admin_orgs))
         s.flush()
         s.expunge(row)
         return row
@@ -1009,3 +1118,283 @@ def job_is_current(row_id: int | None, url: str | None = None) -> bool:
     except Exception as e:  # noqa: BLE001 - a check that fails must not block posting
         log.debug("job_is_current(%s) failed: %s", row_id, e)
         return True
+
+
+# --- bring-your-own-key and custom tiers --------------------------------------
+#
+# Rows leave the session expunged so callers can read them afterwards. Nothing
+# here encrypts or decrypts: the store only ever holds ciphertext, and
+# `cr.app.workspace` is the one place that turns it back into a key.
+
+
+def connections(account: str, url: str | None = None) -> list[ProviderConnection]:
+    with session(url) as s:
+        rows = list(
+            s.scalars(
+                select(ProviderConnection)
+                .where(func.lower(ProviderConnection.account) == account.lower())
+                .order_by(ProviderConnection.created_at, ProviderConnection.id)
+            )
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+def connection(account: str, conn_id: int, url: str | None = None) -> ProviderConnection | None:
+    with session(url) as s:
+        row = s.get(ProviderConnection, conn_id)
+        if row is None or row.account.lower() != account.lower():
+            return None
+        s.expunge(row)
+        return row
+
+
+def save_connection(
+    account: str,
+    *,
+    provider: str,
+    label: str,
+    models: list[dict],
+    ciphertext: str | None = None,
+    hint: str | None = None,
+    resource: str = "",
+    conn_id: int | None = None,
+    created_by: str = "",
+    tested: bool = True,
+    url: str | None = None,
+) -> ProviderConnection:
+    """Create, or update connection `conn_id` of `account`. A None ciphertext
+    keeps the stored key. Raises LookupError for another account's id."""
+    with session(url) as s:
+        if conn_id is None:
+            if ciphertext is None:
+                raise ValueError("a new connection needs a key")
+            row = ProviderConnection(account=account, provider=provider, created_by=created_by)
+            s.add(row)
+        else:
+            found = s.get(ProviderConnection, conn_id)
+            if found is None or found.account.lower() != account.lower():
+                raise LookupError(f"no connection {conn_id}")
+            row = found
+        if ciphertext is not None:
+            row.ciphertext, row.hint = ciphertext, hint or ""
+        row.label, row.resource, row.models = label, resource, models
+        if tested:
+            row.tested_at = _utcnow()
+        s.flush()
+        s.expunge(row)
+        return row
+
+
+def delete_connection(account: str, conn_id: int, url: str | None = None) -> bool:
+    with session(url) as s:
+        row = s.get(ProviderConnection, conn_id)
+        if row is None or row.account.lower() != account.lower():
+            return False
+        s.delete(row)
+        return True
+
+
+def key_tests_since(account: str, since: datetime, url: str | None = None) -> int:
+    with session(url) as s:
+        return int(
+            s.scalar(
+                select(func.count(KeyTest.id)).where(
+                    func.lower(KeyTest.account) == account.lower(), KeyTest.created_at >= since
+                )
+            )
+            or 0
+        )
+
+
+def note_key_test(account: str, url: str | None = None) -> None:
+    with session(url) as s:
+        s.add(KeyTest(account=account))
+
+
+def custom_tiers(account: str, url: str | None = None) -> list[CustomTier]:
+    with session(url) as s:
+        rows = list(
+            s.scalars(
+                select(CustomTier)
+                .where(func.lower(CustomTier.account) == account.lower())
+                .order_by(CustomTier.name)
+            )
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+def custom_tier(account: str, tier_id: int, url: str | None = None) -> CustomTier | None:
+    with session(url) as s:
+        row = s.get(CustomTier, tier_id)
+        if row is None or row.account.lower() != account.lower():
+            return None
+        s.expunge(row)
+        return row
+
+
+def save_custom_tier(
+    account: str,
+    *,
+    name: str,
+    config: dict,
+    tier_id: int | None = None,
+    created_by: str = "",
+    url: str | None = None,
+) -> CustomTier:
+    """Create, or update the tier `tier_id` belonging to `account`.
+
+    Raises ValueError when the account already uses the name on another tier,
+    and LookupError when `tier_id` is not one of this account's tiers.
+    """
+    with session(url) as s:
+        clash = s.scalars(
+            select(CustomTier).where(
+                func.lower(CustomTier.account) == account.lower(),
+                func.lower(CustomTier.name) == name.lower(),
+            )
+        ).first()
+        if clash is not None and clash.id != tier_id:
+            raise ValueError(f"a tier named {name!r} already exists")
+        if tier_id is None:
+            row = CustomTier(account=account, created_by=created_by)
+            s.add(row)
+        else:
+            found = s.get(CustomTier, tier_id)
+            if found is None or found.account.lower() != account.lower():
+                raise LookupError(f"no tier {tier_id}")
+            row = found
+        row.name, row.config = name, config
+        s.flush()
+        s.expunge(row)
+        return row
+
+
+def _rules_row(s: Session, account: str) -> RoutingRules | None:
+    return s.scalars(
+        select(RoutingRules).where(func.lower(RoutingRules.account) == account.lower())
+    ).first()
+
+
+def _normalise_rules(raw: dict | None) -> dict:
+    raw = raw or {}
+    return {"all": raw.get("all"), "repos": dict(raw.get("repos") or {})}
+
+
+def delete_custom_tier(account: str, tier_id: int, url: str | None = None) -> bool:
+    """Delete a tier, and drop every routing rule that pointed at it, so those
+    repositories go back to CR's managed review."""
+    with session(url) as s:
+        row = s.get(CustomTier, tier_id)
+        if row is None or row.account.lower() != account.lower():
+            return False
+        s.delete(row)
+        routing = _rules_row(s, account)
+        if routing is not None:
+            rules = _normalise_rules(routing.rules)
+            routing.rules = {
+                "all": None if rules["all"] == tier_id else rules["all"],
+                "repos": {r: t for r, t in rules["repos"].items() if t != tier_id},
+            }
+        return True
+
+
+def routing_rules(account: str, url: str | None = None) -> dict:
+    with session(url) as s:
+        row = _rules_row(s, account)
+        return _normalise_rules(row.rules if row is not None else None)
+
+
+def save_routing_rules(
+    account: str, rules: dict, *, updated_by: str = "", url: str | None = None
+) -> None:
+    with session(url) as s:
+        row = _rules_row(s, account)
+        if row is None:
+            row = RoutingRules(account=account)
+            s.add(row)
+        row.rules, row.updated_by = _normalise_rules(rules), updated_by
+
+
+def account_repos(account: str, url: str | None = None) -> list[str]:
+    """Repositories of this account CR knows: granted to the App, or reviewed."""
+    prefix = account.lower() + "/"
+    with session(url) as s:
+        names = {
+            r
+            for i in s.scalars(
+                select(Installation).where(func.lower(Installation.account) == account.lower())
+            )
+            if not i.removed
+            for r in (i.repos or [])
+        }
+        names |= set(s.scalars(select(Run.repo).distinct()))
+    return sorted((n for n in names if n.lower().startswith(prefix)), key=str.lower)
+
+
+def known_accounts(url: str | None = None) -> list[str]:
+    """Every account CR has heard of: allowlisted, installed, or reviewed."""
+    with session(url) as s:
+        names = {a.login for a in s.scalars(select(Account))}
+        names |= {i.account for i in s.scalars(select(Installation)) if i.account}
+        names |= {r.split("/", 1)[0] for r in s.scalars(select(Run.repo).distinct()) if "/" in r}
+    return sorted(names, key=str.lower)
+
+
+def byok_spend(account: str, since: datetime, url: str | None = None) -> dict[str, float]:
+    """Spend on an account's own connections since `since`, keyed by the model
+    reference a tier used (`conn:<id>:<model>`)."""
+    prefix = account.lower() + "/"
+    out: dict[str, float] = {}
+    with session(url) as s:
+        rows = s.scalars(
+            select(Run).where(
+                Run.billing == "byok",
+                Run.status == "done",
+                Run.created_at >= since.replace(tzinfo=None),
+            )
+        )
+        for r in rows:
+            if not r.repo.lower().startswith(prefix):
+                continue
+            for mc in r.model_costs or []:
+                out[mc["model"]] = out.get(mc["model"], 0.0) + float(mc.get("cost_usd") or 0.0)
+    return out
+
+
+def repo_guidelines(repo: str, url: str | None = None) -> str:
+    """The owner's review guidelines for a repository, or "". Never raises: a
+    store hiccup must not fail a review over optional context."""
+    try:
+        with session(url) as s:
+            row = s.get(RepoSettings, repo.lower())
+            return row.guidelines if row is not None else ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not read guidelines for %s: %s", repo, e)
+        return ""
+
+
+def account_guidelines(account: str, url: str | None = None) -> dict[str, str]:
+    with session(url) as s:
+        rows = s.scalars(
+            select(RepoSettings).where(
+                func.lower(RepoSettings.account) == account.lower(), RepoSettings.guidelines != ""
+            )
+        )
+        return {r.repo: r.guidelines for r in rows}
+
+
+def save_repo_guidelines(
+    repo: str, account: str, text: str, *, updated_by: str = "", url: str | None = None
+) -> None:
+    """Keyed by the lower-cased repository, since GitHub names are
+    case-insensitive and webhooks do not promise one casing."""
+    with session(url) as s:
+        row = s.get(RepoSettings, repo.lower())
+        if row is None:
+            row = RepoSettings(repo=repo.lower(), account=account)
+            s.add(row)
+        row.guidelines, row.updated_by = text, updated_by

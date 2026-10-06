@@ -13,7 +13,8 @@ export const fmtInt = (n: number) => (n ?? 0).toLocaleString();
 
 /** Axis ticks need to be short, not precise — "$0.0000" clips the gutter. */
 export const fmtAxisUSD = (n: number) =>
-  n === 0 ? "$0" : n >= 1 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
+  // Whole dollars only from $10: rounding 1.2 and 1.6 to "$1" and "$2" mislabels ticks.
+  n === 0 ? "$0" : n >= 10 ? `$${Math.round(n)}` : `$${+n.toFixed(2)}`;
 
 export const fmtPct = (n: number) => `${Math.round((n ?? 0) * 100)}%`;
 
