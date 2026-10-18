@@ -516,6 +516,74 @@ def reply_model(monkeypatch):
     return box
 
 
+def test_conversation_uses_the_repositories_routed_model(settings, monkeypatch):
+    from types import SimpleNamespace
+
+    from cr.app import conversation
+    from cr.config import TierConfig
+    from cr.models import ReplyDraft
+
+    calls = {}
+
+    class CustomerClient:
+        async def parse(self, **kwargs):
+            calls.update(kwargs)
+            return SimpleNamespace(parsed=ReplyDraft(reply="Yes.", verdict="stands", reason="test"))
+
+        def total_cost_usd(self):
+            return 0.01
+
+    tier = TierConfig(
+        name="custom",
+        model="conn:7:finder",
+        effort="low",
+        finders=["correctness"],
+        verifier_lenses=["reachability"],
+        max_comments=8,
+        verifier_model="conn:7:verifier",
+        verifier_effort="high",
+    )
+
+    def routed(_settings, account, repo):
+        assert (account, repo) == ("me", "me/repo")
+        return tier, CustomerClient()
+
+    monkeypatch.setattr(conversation.workspace, "resolve_repo", routed)
+    monkeypatch.setattr(
+        conversation, "_client", lambda _settings: pytest.fail("managed client was used")
+    )
+
+    draft, cost = asyncio.run(
+        conversation._draft_reply(
+            repo="me/repo", meta={}, instruction="answer", diff="", path="", s=settings
+        )
+    )
+
+    assert draft is not None and draft.reply == "Yes."
+    assert cost == 0.01
+    assert calls["model"] == "conn:7:verifier"
+    assert calls["effort"] == "high"
+
+
+def test_unavailable_routed_model_never_falls_back_to_managed(settings, monkeypatch):
+    from cr.app import conversation, workspace
+
+    def unavailable(_settings, _account, _repo):
+        raise workspace.TierUnavailable("customer connection was removed")
+
+    monkeypatch.setattr(conversation.workspace, "resolve_repo", unavailable)
+    monkeypatch.setattr(
+        conversation, "_client", lambda _settings: pytest.fail("managed client was used")
+    )
+
+    draft, cost = asyncio.run(
+        conversation._draft_reply(
+            repo="me/repo", meta={}, instruction="answer", diff="", path="", s=settings
+        )
+    )
+    assert draft is None and cost == 0.0
+
+
 def test_reply_in_our_thread_gets_an_answer(client, github, our_thread, reply_model):
     assert post_hook(client, "pull_request_review_comment", _reply_event()).status_code == 202
     drain(client)

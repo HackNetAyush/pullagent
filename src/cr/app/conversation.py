@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from cr.app import workspace
 from cr.app.api import InstallationClient
 from cr.app.auth import AppAuth
 from cr.app.events import help_text
@@ -236,8 +237,6 @@ async def _draft_reply(
 ) -> tuple[ReplyDraft | None, float]:
     """One structured call. Shares `PrefixBuilder`, so the repo-level prefix
     written by a review in the last hour is read back at cache rates here."""
-    llm = _client(s)
-    model = _model(s)
     pr = PRContext(
         title=meta.get("title") or "",
         description=(meta.get("body") or "")[:2000],
@@ -249,19 +248,30 @@ async def _draft_reply(
         repo=RepoContext(slug=repo, guidelines=store.repo_guidelines(repo)),
         pr=pr,
     )
+    llm: LLMClient | None = None
     try:
+        # Review routing applies to conversations too. A repository on a
+        # customer's tier must never answer with the deployment's managed key.
+        account = repo.split("/", 1)[0]
+        routed = workspace.resolve_repo(s, account, repo)
+        if routed is None:
+            llm, model, effort = _client(s), _model(s), REPLY_EFFORT
+        else:
+            tier, llm = routed
+            model, effort = tier.checker()
+            log.info("reply on %s uses custom tier %s", repo, tier.label or tier.name)
         call = await llm.parse(
             model=model,
             schema=ReplyDraft,
             system=builder.system(),
             messages=builder.messages(instruction),
-            effort=REPLY_EFFORT,
+            effort=effort,
             max_tokens=REPLY_MAX_TOKENS,
             label="reply",
         )
     except Exception as e:  # noqa: BLE001 - a failed reply is silence, not a crash
         log.warning("reply generation failed for %s: %s", repo, e)
-        return None, llm.total_cost_usd()
+        return None, llm.total_cost_usd() if llm is not None else 0.0
 
     draft = call.parsed if isinstance(call.parsed, ReplyDraft) else None
     return draft, llm.total_cost_usd()
